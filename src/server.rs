@@ -18,8 +18,10 @@ enum ParsedMessage {
     Closing,
 }
 
+#[derive(Eq, PartialEq)]
 enum SessionStatus {
     Reading,
+    AwaitingCommit,
     Writing,
     Closing,
 }
@@ -43,14 +45,14 @@ impl Session {
         registry: &Registry,
     ) -> Result<ParsedMessage, GenericError> {
         match self.status {
-            SessionStatus::Reading if event.is_readable() => self.handle_read(registry),
+            SessionStatus::Reading if event.is_readable() => self.handle_read(),
             SessionStatus::Writing if event.is_writable() => self.handle_write(registry),
             SessionStatus::Closing => return Ok(ParsedMessage::Closing),
             _ => Ok(ParsedMessage::Incomplete),
         }
     }
 
-    fn handle_read(&mut self, registry: &Registry) -> Result<ParsedMessage, GenericError> {
+    fn handle_read(&mut self) -> Result<ParsedMessage, GenericError> {
         let mut result = ParsedMessage::Incomplete;
         loop {
             match self.stream.read(&mut self.read_buf.0) {
@@ -73,8 +75,6 @@ impl Session {
                             _ => unreachable!(),
                         };
                         self.bytes_read = 0;
-                        self.status = SessionStatus::Writing;
-                        registry.reregister(&mut self.stream, self.token, Interest::WRITABLE)?;
                         return Ok(result);
                     }
                 }
@@ -169,6 +169,8 @@ fn main() -> Result<(), GenericError> {
                                     print!("{response}");
                                     session.write_buf = Some(response.into_bytes())
                                 }
+                                // our write_buf is staged, now we wait until fsync is complete before sending
+                                session.status = SessionStatus::AwaitingCommit;
                             }
                             Ok(ParsedMessage::Transaction(tx)) => {
                                 let id = tx.account_id;
@@ -195,6 +197,12 @@ fn main() -> Result<(), GenericError> {
         for (_id, entry) in &mut account_entries {
             entry.write()?;
             entry.sync()?;
+        }
+
+        // find all the AwaitingCommit sessions
+        for (t, s) in connections.iter_mut().filter(|(_,s)| s.status == SessionStatus::AwaitingCommit) {
+            s.status = SessionStatus::Writing;
+            poll.registry().reregister(&mut s.stream, *t, Interest::WRITABLE)?;
         }
     }
 }

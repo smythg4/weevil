@@ -11,7 +11,7 @@ Weevil is a single-threaded TCP server that accepts financial transactions from 
 - **Zero-copy wire protocol** — all messages are fixed 32-byte `#[repr(C)]` structs cast directly from network buffers using `bytemuck`. No serialization layer.
 - **Non-blocking I/O** — a single-threaded `mio` event loop handles multiple concurrent connections without threads.
 - **Append-only durable storage** — transactions are written as raw bytes to per-account `.log` files and flushed with `fdatasync` at the end of each event loop batch.
-- **Batch commit** — transactions accumulate across one poll iteration and are flushed together, amortising the cost of `fdatasync` across multiple writes.
+- **Batch commit with response ordering** — transactions accumulate across one poll iteration. At the end of each iteration, dirty account logs are written and flushed with `fdatasync`. Only after the flush completes are sessions promoted from `AwaitingCommit` to `Writing`, guaranteeing no client receives a response before its transaction is durable on disk.
 - **Balance replay** — on startup, each account's balance is reconstructed by replaying its log file 32 bytes at a time.
 
 ## Protocol
@@ -34,6 +34,7 @@ Two message types, both 32 bytes, distinguished by the final byte (`message_kind
 ## Running
 
 ```sh
+mkdir data_files
 # start the server
 cargo run --bin server
 
@@ -45,7 +46,7 @@ The client registers each account, sends a series of random deposits and withdra
 
 ## What it is not
 
-Weevil omits most of what makes TigerBeetle production-worthy: response ordering after fsync, explicit error types, `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
+Weevil omits most of what makes TigerBeetle production-worthy: explicit error types, `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
 
 ## Next Steps
 
@@ -55,10 +56,10 @@ Weevil omits most of what makes TigerBeetle production-worthy: response ordering
 
 - **Copy hunting** — `ParsedMessage::Transaction(*tx)` copies 32 bytes out of the aligned read buffer on every message. `format!(...).into_bytes()` allocates on every response. Use LLVM IR to find these systematically and eliminate them. ([Copy Hunting](https://tigerbeetle.com/blog/2023-07-26-copy-hunting/))
 
-- **Response ordering after fsync** — the client currently receives a response before the batch is flushed to disk. Responses must be held until after `sync_data()` completes. ([The Write Last, Read First Rule](https://tigerbeetle.com/blog/2025-11-06-the-write-last-read-first-rule))
-
 - **Assertion discipline** — `unreachable!()` on network and disk bytes should be proper soft errors. Internal invariants (e.g. `write_buf` is set before `handle_write` fires) should use implication-style assertions. ([Asserting Implications](https://tigerbeetle.com/blog/2025-05-26-asserting-implications/))
 
 - **Naming discipline** — `bytes_read` in `Session` is a byte offset into a fixed 32-byte buffer; the invariant `bytes_read < 32` should be explicit. Apply index/count/offset/size naming conventions throughout. ([Index, Count, Offset, Size](https://tigerbeetle.com/blog/2026-02-16-index-count-offset-size))
+
+- **CRC32 checksums** — repurpose 4 bytes of padding in `Transaction` and `Account` into a `checksum: u32` field. Compute over the remaining 28 bytes of the struct; verify on the way in (network) and on the way out (log replay in `AccountEntry::new`). This turns `assert_eq!(buf[31], MessageKind::Transaction as u8)` and `unreachable!()` from panic-on-corruption into a proper integrity check. Implement using the Hacker's Delight bitwise CRC32 approach — table-free, branch-light, no dependencies. Verification during replay is the more important of the two: a corrupt log record is currently indistinguishable from a valid one.
 
 - **io_uring** — `mio` uses a readiness model (kernel signals fd is ready, userland makes the syscall). `io_uring` uses a completion model (userland submits I/O, kernel does the syscall). Eliminates the context switch on the syscall itself. Significant architectural change but the direction TigerBeetle went. ([A Programmer-Friendly I/O Abstraction Over io_uring and kqueue](https://tigerbeetle.com/blog/2022-11-23-a-friendly-abstraction-over-iouring-and-kqueue))
