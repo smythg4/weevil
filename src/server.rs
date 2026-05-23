@@ -4,10 +4,9 @@ use mio::{Events, Interest, Poll, Registry, Token};
 use std::collections::HashMap;
 use std::io::{Read, Write};
 
+use weevil::GenericError;
 use weevil::account::{Account, AccountEntry};
 use weevil::transaction::Transaction;
-
-type GenericError = Box<dyn std::error::Error>;
 
 const SERVER: Token = Token(0);
 
@@ -18,6 +17,7 @@ enum ParsedMessage {
     Closing,
 }
 
+// TODO: Consider storing the pending write buffer in `AwaitingCommit` and `Writing`
 #[derive(Eq, PartialEq)]
 enum SessionStatus {
     Reading,
@@ -47,8 +47,9 @@ impl Session {
         match self.status {
             SessionStatus::Reading if event.is_readable() => self.handle_read(),
             SessionStatus::Writing if event.is_writable() => self.handle_write(registry),
-            SessionStatus::Closing => return Ok(ParsedMessage::Closing),
-            _ => Ok(ParsedMessage::Incomplete),
+            SessionStatus::Closing => Ok(ParsedMessage::Closing),
+            SessionStatus::AwaitingCommit => Ok(ParsedMessage::Incomplete), // nothing to do until we hit the disk
+            _ => Ok(ParsedMessage::Incomplete), // false trigger on event polling, just try again
         }
     }
 
@@ -72,7 +73,7 @@ impl Session {
                                 let tx: &Transaction = bytemuck::from_bytes(&self.read_buf.0);
                                 ParsedMessage::Transaction(*tx)
                             }
-                            _ => unreachable!(),
+                            _ => return Err(String::from("invalid message type byte").into()),
                         };
                         self.bytes_read = 0;
                         return Ok(result);
@@ -87,19 +88,21 @@ impl Session {
     }
 
     fn handle_write(&mut self, registry: &Registry) -> Result<ParsedMessage, GenericError> {
-        if let Some(data) = self.write_buf.take() {
-            match self.stream.write_all(&data) {
-                Ok(()) => {
-                    self.status = SessionStatus::Reading;
-                    registry.reregister(&mut self.stream, self.token, Interest::READABLE)?;
-                }
-                Err(e) if would_block(&e) => self.write_buf = Some(data),
-                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
-                    return Ok(ParsedMessage::Incomplete);
-                }
-                Err(e) if interrupted(&e) => return Ok(ParsedMessage::Incomplete),
-                Err(e) => return Err(e.into()),
+        let data = self
+            .write_buf
+            .take()
+            .expect("write_buf must be Some in Writing state");
+        match self.stream.write_all(&data) {
+            Ok(()) => {
+                self.status = SessionStatus::Reading;
+                registry.reregister(&mut self.stream, self.token, Interest::READABLE)?;
             }
+            Err(e) if would_block(&e) || interrupted(&e) => self.write_buf = Some(data),
+            Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                self.status = SessionStatus::Closing;
+                return Ok(ParsedMessage::Incomplete);
+            }
+            Err(e) => return Err(e.into()),
         }
         Ok(ParsedMessage::Incomplete)
     }
@@ -147,7 +150,7 @@ fn main() -> Result<(), GenericError> {
                         match session.handle(event, poll.registry()) {
                             Ok(ParsedMessage::Closing) => {
                                 if let Ok(addr) = session.stream.peer_addr() {
-                                    println!("[{:?}] Disconnected", addr);
+                                    println!("[{}] Disconnected", addr);
                                 } else {
                                     println!("[UNKNOWN CLIENT] Disconnected");
                                 }
@@ -175,7 +178,8 @@ fn main() -> Result<(), GenericError> {
                             Ok(ParsedMessage::Transaction(tx)) => {
                                 let id = tx.account_id;
                                 if let Some(a) = account_entries.get_mut(&id) {
-                                    let response = format!("[SERVER] Pushing transaction to {a}...\n");
+                                    let response =
+                                        format!("[SERVER] Pushing transaction to {a}...\n");
                                     print!("{response}");
                                     session.write_buf = Some(response.into_bytes());
                                     a.add_transaction(tx);
@@ -184,9 +188,14 @@ fn main() -> Result<(), GenericError> {
                                     print!("{response}");
                                     session.write_buf = Some(response.into_bytes());
                                 }
-                            },
+                                // our write_buf is staged, now we wait until fsync is complete before sending
+                                session.status = SessionStatus::AwaitingCommit;
+                            }
                             Err(e) => {
+                                // log the error
                                 eprintln!("ERROR: {e}");
+                                // close the session
+                                session.status = SessionStatus::Closing;
                             }
                         }
                     }
@@ -194,15 +203,19 @@ fn main() -> Result<(), GenericError> {
             }
         }
 
-        for (_id, entry) in &mut account_entries {
+        for entry in account_entries.values_mut() {
             entry.write()?;
             entry.sync()?;
         }
 
         // find all the AwaitingCommit sessions
-        for (t, s) in connections.iter_mut().filter(|(_,s)| s.status == SessionStatus::AwaitingCommit) {
+        for (t, s) in connections
+            .iter_mut()
+            .filter(|(_, s)| s.status == SessionStatus::AwaitingCommit)
+        {
             s.status = SessionStatus::Writing;
-            poll.registry().reregister(&mut s.stream, *t, Interest::WRITABLE)?;
+            poll.registry()
+                .reregister(&mut s.stream, *t, Interest::WRITABLE)?;
         }
     }
 }

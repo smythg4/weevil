@@ -2,9 +2,9 @@ use bytemuck::{Pod, Zeroable};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
+use crate::GenericError;
 use crate::MessageKind;
 use crate::transaction::{Transaction, TransactionKind};
-type GenericError = Box<dyn std::error::Error>;
 
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
@@ -78,12 +78,20 @@ impl AccountEntry {
             .open(&path)?;
         let mut cached_balance = 0;
         let mut buf = [0u8; 32];
-        while f.read_exact(&mut buf).is_ok() {
-            assert_eq!(buf[31], MessageKind::Transaction as u8);
-            let tx = bytemuck::pod_read_unaligned::<Transaction>(&buf);
-            match tx.kind() {
-                TransactionKind::Deposit => cached_balance += tx.amount as i128,
-                TransactionKind::Withdrawal => cached_balance -= tx.amount as i128,
+        loop {
+            match f.read_exact(&mut buf) {
+                Ok(_) => {
+                    if buf[31] != MessageKind::Transaction as u8 {
+                        return Err(String::from("invalid message kind byte").into());
+                    }
+                    let tx = bytemuck::pod_read_unaligned::<Transaction>(&buf);
+                    match tx.kind() {
+                        TransactionKind::Deposit => cached_balance += tx.amount as i128,
+                        TransactionKind::Withdrawal => cached_balance -= tx.amount as i128,
+                    };
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
+                Err(e) => return Err(e.into()),
             };
         }
         Ok(AccountEntry {

@@ -8,6 +8,9 @@ pub enum TransactionKind {
     Withdrawal,
 }
 
+// TODO: Add a txid field for idempotency purposes
+// Ex: Client sents tx with id, responses are acknowldged
+// with the same id
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Transaction {
@@ -40,7 +43,7 @@ impl Transaction {
 
 impl std::fmt::Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sign = match self.kind(){
+        let sign = match self.kind() {
             TransactionKind::Deposit => "",
             TransactionKind::Withdrawal => "-",
         };
