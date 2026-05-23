@@ -46,3 +46,19 @@ The client registers each account, sends a series of random deposits and withdra
 ## What it is not
 
 Weevil omits most of what makes TigerBeetle production-worthy: response ordering after fsync, explicit error types, `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
+
+## Next Steps
+
+- **Static memory allocation** — replace `HashMap`, `Vec`, and `Box<dyn Error>` with fixed-size arrays and explicit error enums allocated once at startup. TODOs are peppered throughout the code. ([A Database Without Dynamic Memory Allocation](https://tigerbeetle.com/blog/2022-10-12-a-database-without-dynamic-memory/))
+
+- **Separate credits and debits** — replace `cached_balance: i128` with `credits_posted: u128` and `debits_posted: u128`. Signed balance hides transaction volume and introduces sign ambiguity. Also eliminate `as f64` in `Display` — use integer arithmetic for all money formatting. ([64-Bit Bank Balances 'Ought to be Enough for Anybody'?](https://tigerbeetle.com/blog/2023-09-19-64-bit-bank-balances-ought-to-be-enough-for-anybody))
+
+- **Copy hunting** — `ParsedMessage::Transaction(*tx)` copies 32 bytes out of the aligned read buffer on every message. `format!(...).into_bytes()` allocates on every response. Use LLVM IR to find these systematically and eliminate them. ([Copy Hunting](https://tigerbeetle.com/blog/2023-07-26-copy-hunting/))
+
+- **Response ordering after fsync** — the client currently receives a response before the batch is flushed to disk. Responses must be held until after `sync_data()` completes. ([The Write Last, Read First Rule](https://tigerbeetle.com/blog/2025-11-06-the-write-last-read-first-rule))
+
+- **Assertion discipline** — `unreachable!()` on network and disk bytes should be proper soft errors. Internal invariants (e.g. `write_buf` is set before `handle_write` fires) should use implication-style assertions. ([Asserting Implications](https://tigerbeetle.com/blog/2025-05-26-asserting-implications/))
+
+- **Naming discipline** — `bytes_read` in `Session` is a byte offset into a fixed 32-byte buffer; the invariant `bytes_read < 32` should be explicit. Apply index/count/offset/size naming conventions throughout. ([Index, Count, Offset, Size](https://tigerbeetle.com/blog/2026-02-16-index-count-offset-size))
+
+- **io_uring** — `mio` uses a readiness model (kernel signals fd is ready, userland makes the syscall). `io_uring` uses a completion model (userland submits I/O, kernel does the syscall). Eliminates the context switch on the syscall itself. Significant architectural change but the direction TigerBeetle went. ([A Programmer-Friendly I/O Abstraction Over io_uring and kqueue](https://tigerbeetle.com/blog/2022-11-23-a-friendly-abstraction-over-iouring-and-kqueue))

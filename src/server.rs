@@ -115,9 +115,13 @@ fn main() -> Result<(), GenericError> {
     poll.registry()
         .register(&mut server, SERVER, Interest::READABLE)?;
 
+    // TODO: Replace HashMap with [Option<Session>; MAX_CONNECTIONS] and use the token value as a
+    // direct array index
     let mut connections = HashMap::new();
     let mut unique_token = Token(SERVER.0 + 1);
 
+    // TODO: Replace HashMap with [Option<AccountEntry>; MAX_ACCOUNTS] and use a hash to establish
+    // direct array index. Probably needs cache eviction policy so this might be heavy.
     let mut account_entries = HashMap::new();
 
     println!("Waiting to receive Weevil messages on {addr}...");
@@ -153,6 +157,7 @@ fn main() -> Result<(), GenericError> {
                             Ok(ParsedMessage::Incomplete) => continue,
                             Ok(ParsedMessage::Account(acct)) => {
                                 if let Some(a) = account_entries.get(&acct.account_id) {
+                                    // TODO: Establish fixed sized response format
                                     let response = format!("[SERVER] {a}\n");
                                     print!("{response}");
                                     session.write_buf = Some(response.into_bytes());

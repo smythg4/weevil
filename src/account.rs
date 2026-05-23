@@ -52,6 +52,7 @@ pub struct AccountEntry {
     account_id: u64,
     file_backing: File,
     pub cached_balance: i128,
+    // TODO: replace Vec with [Transaction; MAX_BATCH] and a len: usize counter
     pending_transactions: Vec<Transaction>,
     dirty: bool,
 }
