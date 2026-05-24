@@ -2,8 +2,8 @@ use bytemuck::{Pod, Zeroable};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
-use crate::GenericError;
 use crate::MessageKind;
+use crate::WeevilError;
 use crate::transaction::{Transaction, TransactionKind};
 
 #[repr(C)]
@@ -51,7 +51,7 @@ mod tests {
 const MAX_BATCH: usize = 100;
 
 pub struct AccountEntry {
-    account_id: u64,
+    pub account_id: u64,
     file_backing: File,
     pub cached_balance: i128,
     pending_transactions: [Transaction; MAX_BATCH],
@@ -71,7 +71,7 @@ impl std::fmt::Display for AccountEntry {
 }
 
 impl AccountEntry {
-    pub fn new(account_id: u64) -> Result<Self, GenericError> {
+    pub fn new(account_id: u64) -> Result<Self, WeevilError> {
         let path = format!("./data_files/{account_id}.log");
         let mut f = OpenOptions::new()
             .read(true)
@@ -84,7 +84,7 @@ impl AccountEntry {
             match f.read_exact(&mut buf) {
                 Ok(_) => {
                     if buf[31] != MessageKind::Transaction as u8 {
-                        return Err(String::from("invalid message kind byte").into());
+                        return Err(WeevilError::InvalidMessageKind(buf[31]));
                     }
                     let tx = bytemuck::pod_read_unaligned::<Transaction>(&buf);
                     match tx.kind() {
@@ -106,9 +106,9 @@ impl AccountEntry {
         })
     }
 
-    pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), GenericError> {
+    pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), WeevilError> {
         if self.len >= MAX_BATCH {
-            return Err("pending_transactions full".into());
+            return Err(WeevilError::PendingTransactionsFull);
         }
         self.dirty = true;
         self.pending_transactions[self.len] = tx;
@@ -116,9 +116,11 @@ impl AccountEntry {
         Ok(())
     }
 
-    pub fn write(&mut self) -> Result<(), GenericError> {
+    pub fn write(&mut self) -> Result<(), WeevilError> {
+        self.file_backing.write_all(bytemuck::cast_slice(
+            &self.pending_transactions[0..self.len],
+        ))?;
         for tx in &self.pending_transactions[0..self.len] {
-            self.file_backing.write_all(bytemuck::bytes_of(tx))?;
             match tx.kind() {
                 TransactionKind::Deposit => self.cached_balance += tx.amount as i128,
                 TransactionKind::Withdrawal => self.cached_balance -= tx.amount as i128,
@@ -128,7 +130,7 @@ impl AccountEntry {
         Ok(())
     }
 
-    pub fn sync(&mut self) -> Result<(), GenericError> {
+    pub fn sync(&mut self) -> Result<(), WeevilError> {
         if self.dirty {
             self.file_backing.sync_data()?;
             self.dirty = false;
@@ -136,7 +138,7 @@ impl AccountEntry {
         Ok(())
     }
 
-    pub fn flush(&mut self) -> Result<(), GenericError> {
+    pub fn flush(&mut self) -> Result<(), WeevilError> {
         self.write()?;
         self.sync()
     }
@@ -167,11 +169,21 @@ pub const NOT_FOUND: AccountResponse = AccountResponse {
     status: 1,
 };
 
+pub const CACHE_FULL: AccountResponse = AccountResponse {
+    cached_balance: 0,
+    account_id: 0,
+    _pad: [0u8; 7],
+    status: 2,
+};
+
 impl std::fmt::Display for AccountResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.status != 0 {
+        if self.status == 1 {
             return write!(f, "Account not found");
+        } else if self.status == 2 {
+            return write!(f, "Server account cache full");
         }
+
         if self.cached_balance >= 0 {
             write!(
                 f,

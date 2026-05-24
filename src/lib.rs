@@ -1,10 +1,11 @@
 pub mod account;
+pub mod error;
 pub mod transaction;
-
-pub type GenericError = Box<dyn std::error::Error>;
 
 #[repr(u8)]
 pub enum MessageKind {
     Account,
     Transaction,
 }
+
+pub use error::WeevilError;

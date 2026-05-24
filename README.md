@@ -12,10 +12,13 @@ Weevil is a single-threaded TCP server that accepts financial transactions from 
 - **Non-blocking I/O** — a single-threaded `mio` event loop handles multiple concurrent connections without threads.
 - **Append-only durable storage** — transactions are written as raw bytes to per-account `.log` files and flushed with `fdatasync` at the end of each event loop batch.
 - **Batch commit with response ordering** — transactions accumulate across one poll iteration. At the end of each iteration, dirty account logs are written and flushed with `fdatasync`. Only after the flush completes are sessions promoted from `AwaitingCommit` to `Writing`, guaranteeing no client receives a response before its transaction is durable on disk.
+- **Batched disk writes** — all pending transactions for an account are written in a single `write_all(bytemuck::cast_slice(...))` call rather than one syscall per transaction. `bytemuck::cast_slice` reinterprets the contiguous `[Transaction; N]` array as a flat `&[u8]` with no copying.
 - **Balance replay** — on startup, each account's balance is reconstructed by replaying its log file 32 bytes at a time.
 - **Static connection table** — connections are stored in a fixed `[Option<Session>; MAX_CONNECTIONS]` array. The mio `Token` is a direct array index. No `HashMap`, no hashing, no pointer chasing — O(1) lookup by design.
+- **Static account cache with open addressing** — accounts are stored in a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array. Slot selection uses modulo hashing with linear probing and full wrap-around — no `HashMap`, no heap allocation. `MAX_ACCOUNTS` is prime (257) to reduce probe clustering.
 - **Static pending transaction buffer** — each `AccountEntry` holds a `[Transaction; MAX_BATCH]` array with a `len` counter. No `Vec`, no heap growth. When the batch is full, `add_transaction` returns an error rather than flushing inline, preserving the batch commit guarantee.
 - **Type-state response buffer** — `SessionStatus::AwaitingCommit([u8; 32])` and `Writing([u8; 32])` carry the response payload inside the state. The type system enforces that a session cannot be in `Writing` state without a response ready to send. No separate `write_buf` field, no `Option` to unwrap.
+- **TCP_NODELAY** — set on every accepted connection. With 32-byte messages, Nagle's algorithm would buffer responses and add per-message latency. `TCP_NODELAY` ensures responses are sent immediately after the fsync completes.
 
 ## Protocol
 
@@ -45,18 +48,21 @@ All messages are 32 bytes. Client-to-server messages are distinguished by the fi
 | 24–30 | padding | [u8; 7] |
 | 31 | status | u8 |
 
-The response reflects the committed balance at the previous flush boundary — the pending transaction has been accepted into the batch but `cached_balance` is updated when the batch is written to disk, not at enqueue time. `status` is 0
-for success responses, 1 represents account not found.
+The response reflects the committed balance at the previous flush boundary — the pending transaction has been accepted into the batch but `cached_balance` is updated when the batch is written to disk, not at enqueue time.
+
+| `status` | Meaning |
+|---|---|
+| 0 | Success |
+| 1 | Account not found |
+| 2 | Account cache full |
 
 ## Running
 
 ```sh
-# make the data directory if required
-mkdir data_files
-# start the server
+# start the server (creates ./data_files/ automatically on first run)
 cargo run --bin server
 
-# run the test client (8 concurrent threads, 100 transactions each)
+# run the test client (NUM_THREADS concurrent connections, NUM_TRANSACTIONS each)
 cargo run --bin client
 ```
 
@@ -64,18 +70,13 @@ The client registers each account, sends a series of random deposits and withdra
 
 ## What it is not
 
-Weevil omits most of what makes TigerBeetle production-worthy: explicit error types, `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
+Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
 
 ## Next Steps
-
-- **Fix Account Entry Keys** — `account_entries` is keyed simply by modding the `account_id` `u64` by the `MAX_ACCOUNTS`.
-Need to do some collision detection and linear scanning to make this work properly.
 
 - **Separate credits and debits** — replace `cached_balance: i128` with `credits_posted: u128` and `debits_posted: u128`. Signed balance hides transaction volume and introduces sign ambiguity. Eliminate `as f64` in `Display` — use integer arithmetic for all money formatting. ([64-Bit Bank Balances 'Ought to be Enough for Anybody'?](https://tigerbeetle.com/blog/2023-09-19-64-bit-bank-balances-ought-to-be-enough-for-anybody))
 
 - **Assertion discipline** — `tx.kind()` uses `unreachable!()` on the `transaction_kind` byte from disk during log replay. A corrupt byte is external data, not an internal invariant violation — it should return a soft error rather than panic. ([Asserting Implications](https://tigerbeetle.com/blog/2025-05-26-asserting-implications/))
-
-- **Explicit error types** — `GenericError = Box<dyn std::error::Error>` erases error information and allocates on every error path. An explicit error enum costs twenty lines once and gives exhaustive matching, zero allocations, and the ability to distinguish recoverable from fatal errors at call sites.
 
 - **Copy hunting** — `ParsedMessage::Transaction(*tx)` copies 32 bytes out of the aligned read buffer on every transaction message. Use LLVM IR to find remaining copies systematically. ([Copy Hunting](https://tigerbeetle.com/blog/2023-07-26-copy-hunting/))
 

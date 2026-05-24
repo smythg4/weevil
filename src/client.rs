@@ -2,14 +2,14 @@ use rand::prelude::*;
 use std::io::Read;
 use std::thread;
 use std::{io::Write, net::TcpStream};
-use weevil::GenericError;
+use weevil::WeevilError;
 use weevil::account::{Account, AccountResponse};
 use weevil::transaction::{Transaction, TransactionKind};
 
-const NUM_THREADS: usize = 8;
+const NUM_THREADS: usize = 4;
 const NUM_TRANSACTIONS: usize = 100;
 
-fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), GenericError> {
+fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), WeevilError> {
     conn.write_all(outbound)?;
     let mut buffer = [0u8; 32];
     conn.read_exact(&mut buffer)?;
@@ -18,10 +18,11 @@ fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), Generi
     Ok(())
 }
 
-fn client_connection(account_id: u64) -> Result<(), GenericError> {
+fn client_connection(account_id: u64) -> Result<(), WeevilError> {
     let mut conn = TcpStream::connect("127.0.0.1:3333")?;
 
     let acct = Account::new(account_id);
+    println!("[CLIENT] {acct}");
     handle_round_trip(&mut conn, bytemuck::bytes_of(&acct))?;
 
     let mut rng = rand::rng();
@@ -33,10 +34,12 @@ fn client_connection(account_id: u64) -> Result<(), GenericError> {
             TransactionKind::Withdrawal
         };
         let tx = Transaction::new(rng.random_range(1000u128..=1_000_000), account_id, kind);
+        println!("[CLIENT] {tx}");
         handle_round_trip(&mut conn, bytemuck::bytes_of(&tx))?;
     }
 
     let acct = Account::new(account_id);
+    println!("[CLIENT] {acct}");
     handle_round_trip(&mut conn, bytemuck::bytes_of(&acct))?;
 
     Ok(())
