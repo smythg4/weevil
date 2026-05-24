@@ -48,12 +48,14 @@ mod tests {
     }
 }
 
+const MAX_BATCH: usize = 100;
+
 pub struct AccountEntry {
     account_id: u64,
     file_backing: File,
     pub cached_balance: i128,
-    // TODO: replace Vec with [Transaction; MAX_BATCH] and a len: usize counter
-    pending_transactions: Vec<Transaction>,
+    pending_transactions: [Transaction; MAX_BATCH],
+    len: usize,
     dirty: bool,
 }
 
@@ -98,25 +100,31 @@ impl AccountEntry {
             account_id,
             file_backing: f,
             cached_balance,
-            pending_transactions: Vec::new(),
+            pending_transactions: [Transaction::default(); MAX_BATCH],
+            len: 0,
             dirty: false,
         })
     }
 
-    pub fn add_transaction(&mut self, tx: Transaction) {
+    pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), GenericError> {
+        if self.len >= MAX_BATCH {
+            return Err("pending_transactions full".into());
+        }
         self.dirty = true;
-        self.pending_transactions.push(tx);
+        self.pending_transactions[self.len] = tx;
+        self.len += 1;
+        Ok(())
     }
 
     pub fn write(&mut self) -> Result<(), GenericError> {
-        for tx in &self.pending_transactions {
+        for tx in &self.pending_transactions[0..self.len] {
             self.file_backing.write_all(bytemuck::bytes_of(tx))?;
             match tx.kind() {
                 TransactionKind::Deposit => self.cached_balance += tx.amount as i128,
                 TransactionKind::Withdrawal => self.cached_balance -= tx.amount as i128,
             };
         }
-        self.pending_transactions.clear();
+        self.len = 0;
         Ok(())
     }
 
@@ -131,5 +139,41 @@ impl AccountEntry {
     pub fn flush(&mut self) -> Result<(), GenericError> {
         self.write()?;
         self.sync()
+    }
+
+    pub fn response(&self) -> AccountResponse {
+        AccountResponse {
+            cached_balance: self.cached_balance,
+            account_id: self.account_id,
+            _pad: [0u8; 8],
+        }
+    }
+}
+
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct AccountResponse {
+    cached_balance: i128,
+    account_id: u64,
+    _pad: [u8; 8],
+}
+
+impl std::fmt::Display for AccountResponse {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.cached_balance >= 0 {
+            write!(
+                f,
+                "[{}] ${:.2}",
+                self.account_id,
+                self.cached_balance as f64 / 1000.0
+            )
+        } else {
+            write!(
+                f,
+                "[{}] -${:.2}",
+                self.account_id,
+                self.cached_balance.abs() as f64 / 1000.0
+            )
+        }
     }
 }

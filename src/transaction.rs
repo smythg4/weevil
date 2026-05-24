@@ -12,7 +12,7 @@ pub enum TransactionKind {
 // Ex: Client sents tx with id, responses are acknowldged
 // with the same id
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+#[derive(Debug, Default, Copy, Clone, Pod, Zeroable)]
 pub struct Transaction {
     pub amount: u128,
     pub account_id: u64,

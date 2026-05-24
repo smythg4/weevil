@@ -5,7 +5,7 @@ use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use weevil::GenericError;
-use weevil::account::{Account, AccountEntry};
+use weevil::account::{Account, AccountEntry, AccountResponse};
 use weevil::transaction::Transaction;
 
 const SERVER: Token = Token(0);
@@ -20,11 +20,10 @@ enum ParsedMessage {
     Closing,
 }
 
-#[derive(Eq, PartialEq)]
 enum SessionStatus {
     Reading,
-    AwaitingCommit(Vec<u8>),
-    Writing(Vec<u8>),
+    AwaitingCommit([u8; 32]),
+    Writing([u8; 32]),
     Closing,
 }
 
@@ -35,7 +34,7 @@ struct AlignedBuf([u8; 32]);
 struct Session {
     stream: TcpStream,
     read_buf: AlignedBuf,
-    bytes_read: usize,
+    offset: usize,
     status: SessionStatus,
     token: Token,
 }
@@ -63,8 +62,8 @@ impl Session {
                     return Ok(ParsedMessage::Closing);
                 }
                 Ok(n) => {
-                    self.bytes_read += n;
-                    if self.bytes_read == 32 {
+                    self.offset += n;
+                    if self.offset == 32 {
                         let result = match self.read_buf.0[31] {
                             0 => {
                                 let acct: &Account = bytemuck::from_bytes(&self.read_buf.0);
@@ -76,7 +75,7 @@ impl Session {
                             }
                             _ => return Err(String::from("invalid message type byte").into()),
                         };
-                        self.bytes_read = 0;
+                        self.offset = 0;
                         return Ok(result);
                     }
                 }
@@ -93,7 +92,7 @@ impl Session {
     fn handle_write(&mut self, registry: &Registry) -> Result<ParsedMessage, GenericError> {
         let old = std::mem::replace(&mut self.status, SessionStatus::Reading);
         let SessionStatus::Writing(data) = old else {
-            panic!("write_buf must be Some in Writing state")
+            panic!("session status must be `SessionStatus::Writing(data)`")
         };
         match self.stream.write_all(&data) {
             Ok(()) => {
@@ -111,7 +110,7 @@ impl Session {
         Ok(ParsedMessage::Incomplete)
     }
 
-    fn stage_response(&mut self, response: Vec<u8>) {
+    fn stage_response(&mut self, response: [u8; 32]) {
         self.status = SessionStatus::AwaitingCommit(response);
     }
 }
@@ -131,7 +130,7 @@ fn main() -> Result<(), GenericError> {
 
     // TODO: Replace HashMap with [Option<AccountEntry>; MAX_ACCOUNTS] and use a hash to establish
     // direct array index. Probably needs cache eviction policy so this might be heavy.
-    let mut account_entries = HashMap::new();
+    let mut account_entries: HashMap<u64, AccountEntry> = HashMap::new();
 
     println!("Waiting to receive Weevil messages on {addr}...");
 
@@ -161,35 +160,41 @@ fn main() -> Result<(), GenericError> {
                             Ok(ParsedMessage::Incomplete) => continue,
                             Ok(ParsedMessage::Account(acct)) => {
                                 if let Some(a) = account_entries.get(&acct.account_id) {
-                                    // TODO: Establish fixed sized response format
-                                    let response = format!("[SERVER] {a}\n");
-                                    print!("{response}");
+                                    println!("{a}");
                                     // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(response.into_bytes());
+                                    session.stage_response(bytemuck::cast::<
+                                        AccountResponse,
+                                        [u8; 32],
+                                    >(
+                                        a.response()
+                                    ));
                                 } else {
                                     let entry = AccountEntry::new(acct.account_id)?;
-                                    let response =
-                                        format!("[SERVER] Registering account: {entry}...\n");
-                                    account_entries.insert(acct.account_id, entry);
-                                    print!("{response}");
                                     // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(response.into_bytes());
+                                    session.stage_response(bytemuck::cast::<
+                                        AccountResponse,
+                                        [u8; 32],
+                                    >(
+                                        entry.response()
+                                    ));
+                                    println!("Registering account: {entry}...");
+                                    account_entries.insert(acct.account_id, entry);
                                 }
                             }
                             Ok(ParsedMessage::Transaction(tx)) => {
                                 let id = tx.account_id;
                                 if let Some(a) = account_entries.get_mut(&id) {
-                                    let response =
-                                        format!("[SERVER] Pushing transaction to {a}...\n");
-                                    print!("{response}");
+                                    println!("Pushing transaction to {a}...");
+                                    a.add_transaction(tx)?;
                                     // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(response.into_bytes());
-                                    a.add_transaction(tx);
+                                    session.stage_response(bytemuck::cast::<
+                                        AccountResponse,
+                                        [u8; 32],
+                                    >(
+                                        a.response()
+                                    ));
                                 } else {
-                                    let response = format!("Account [{id}] not found...\n");
-                                    print!("{response}");
-                                    // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(response.into_bytes());
+                                    eprintln!("Account [{id}] not found...");
                                 }
                             }
                             Err(e) => {
@@ -236,12 +241,12 @@ fn accept_connections(
     loop {
         match server.accept() {
             Ok((mut stream, address)) if let Some(token) = next_token(connections) => {
-                eprintln!("[{}] Connection received", address);
+                println!("[{}] Connection received", address);
                 registry.register(&mut stream, token, Interest::READABLE)?;
                 connections[token.0] = Some(Session {
                     stream,
                     read_buf: AlignedBuf::default(),
-                    bytes_read: 0,
+                    offset: 0,
                     status: SessionStatus::Reading,
                     token,
                 });

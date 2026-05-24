@@ -1,9 +1,9 @@
 use rand::prelude::*;
-use std::io::{BufRead, BufReader};
+use std::io::Read;
 use std::thread;
 use std::{io::Write, net::TcpStream};
 use weevil::GenericError;
-use weevil::account::Account;
+use weevil::account::{Account, AccountResponse};
 use weevil::transaction::{Transaction, TransactionKind};
 
 const NUM_THREADS: usize = 8;
@@ -11,13 +11,13 @@ const NUM_TRANSACTIONS: usize = 100;
 
 fn client_connection(account_id: u64) -> Result<(), GenericError> {
     let mut conn = TcpStream::connect("127.0.0.1:3333")?;
-    let mut reader = BufReader::new(conn.try_clone()?);
 
     let acct = Account::new(account_id);
-    conn.write_all(bytemuck::bytes_of(&acct)).unwrap();
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-    print!("{response}");
+    conn.write_all(bytemuck::bytes_of(&acct))?;
+    let mut buffer = [0u8; 32];
+    conn.read_exact(&mut buffer)?;
+    let response: &AccountResponse = bytemuck::from_bytes(&buffer);
+    println!("[SERVER] {response}");
 
     let mut rng = rand::rng();
 
@@ -30,18 +30,19 @@ fn client_connection(account_id: u64) -> Result<(), GenericError> {
         let tx = Transaction::new(rng.random_range(1000u128..=1_000_000), account_id, kind);
         conn.write_all(bytemuck::bytes_of(&tx))?;
 
-        let mut response = String::new();
-        reader.read_line(&mut response)?;
-        print!("{response}");
+        let mut buffer = [0u8; 32];
+        conn.read_exact(&mut buffer)?;
+        let response: &AccountResponse = bytemuck::from_bytes(&buffer);
+        println!("[SERVER] {response}");
     }
 
     let acct = Account::new(account_id);
     conn.write_all(bytemuck::bytes_of(&acct))?;
 
-    let mut response = String::new();
-    reader.read_line(&mut response)?;
-
-    print!("{response}");
+    let mut buffer = [0u8; 32];
+    conn.read_exact(&mut buffer)?;
+    let response: &AccountResponse = bytemuck::from_bytes(&buffer);
+    println!("[SERVER] {response}");
 
     Ok(())
 }
