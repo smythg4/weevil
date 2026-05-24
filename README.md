@@ -67,12 +67,14 @@ cargo run --bin server
 cargo run --bin client
 ```
 
-The client registers each account, sends a series of random deposits and withdrawals, then queries the final balance. Log files are written to `./data_files/` and persist across restarts.
+The client registers each account, sends a series of random debits and credits, then queries the final balance. Log files are written to `./data_files/` and persist across restarts.
 
 ## What it is not
 
 Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
 
 ## Next Steps
+
+- **Single WAL file** — currently performing N fsyncs per event loop iteration, one per dirty account. Consolidating all transactions into a single append-only `wal.log` reduces that to one fsync per batch regardless of how many accounts were touched. Will require reworking the startup replay logic and removing the per-account file handle from `AccountEntry`.
 
 - **CRC32 checksums** — repurpose padding bytes in `Transaction` and `Account` into a `checksum: u32` field. Compute over the remaining bytes; verify on ingress (network) and during log replay. Expanding to 64-byte structs resolves alignment constraints cleanly. Implement using the Hacker's Delight bitwise CRC32 approach — table-free, branch-light, no dependencies.
