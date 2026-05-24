@@ -1,12 +1,23 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::MessageKind;
+use crate::{MessageKind, WeevilError};
 
 #[repr(u8)]
 pub enum TransactionKind {
-    Deposit,
-    Withdrawal,
+    Debit,
+    Credit,
 }
+
+impl std::fmt::Display for TransactionKind {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            TransactionKind::Debit => write!(f, "DEBIT"),
+            TransactionKind::Credit => write!(f, "CREDIT"),
+        }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<Transaction>() == 64);
 
 // TODO: Add a txid field for idempotency purposes
 // Ex: Client sents tx with id, responses are acknowldged
@@ -17,7 +28,8 @@ pub struct Transaction {
     pub amount: u128,
     pub account_id: u64,
     transaction_kind: u8,
-    _pad: [u8; 6],
+    _pad: [u8; 32],
+    _pad2: [u8; 6],
     message_kind: u8,
 }
 
@@ -28,27 +40,30 @@ impl Transaction {
             account_id,
             transaction_kind: transaction_kind as u8,
             message_kind: MessageKind::Transaction as u8,
-            _pad: [0u8; 6],
+            _pad: [0u8; 32],
+            _pad2: [0u8; 6],
         }
     }
 
-    pub fn kind(&self) -> TransactionKind {
+    pub fn kind(&self) -> Result<TransactionKind, WeevilError> {
         match self.transaction_kind {
-            0 => TransactionKind::Deposit,
-            1 => TransactionKind::Withdrawal,
-            _ => unreachable!(),
+            0 => Ok(TransactionKind::Debit),
+            1 => Ok(TransactionKind::Credit),
+            _ => Err(WeevilError::InvalidMessageKind(self.transaction_kind)),
         }
     }
 }
 
 impl std::fmt::Display for Transaction {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let sign = match self.kind() {
-            TransactionKind::Deposit => "",
-            TransactionKind::Withdrawal => "-",
-        };
         let value = self.amount as f64 / 1000.0;
-        write!(f, "[{}] {:2}${:.2}", self.account_id, sign, value)
+        write!(f, "[{}] ", self.account_id)?;
+        if let Ok(k) = self.kind() {
+            write!(f, "{k} ")?;
+        } else {
+            write!(f, "UNKNOWN ")?;
+        };
+        write!(f, "${:.2}", value)
     }
 }
 
@@ -58,15 +73,15 @@ mod tests {
 
     #[test]
     fn test_transaction_cast() {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; 64];
         // amount: 1000 as u128, little-endian at offset 0
         bytes[0..16].copy_from_slice(&1000u128.to_le_bytes());
         // account_id: 42 as u64, little-endian at offset 16
         bytes[16..24].copy_from_slice(&42u64.to_le_bytes());
-        // kind: 1 (Withdrawal) at offset 24
+        // kind: 1 (Credit) at offset 24
         bytes[24] = 1;
         // message_kind = 1 (Transaction)
-        bytes[31] = 1;
+        bytes[63] = 1;
 
         let tx: &Transaction = bytemuck::from_bytes(&bytes);
         assert_eq!(tx.amount, 1000);

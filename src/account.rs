@@ -6,11 +6,13 @@ use crate::MessageKind;
 use crate::WeevilError;
 use crate::transaction::{Transaction, TransactionKind};
 
+const _: () = assert!(std::mem::size_of::<Account>() == 64);
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Account {
     pub account_id: u64,
-    _pad: [u8; 23],
+    _pad: [u8; 32],
+    _pad2: [u8; 23],
     message_kind: u8,
 }
 
@@ -18,7 +20,8 @@ impl Account {
     pub fn new(account_id: u64) -> Self {
         Account {
             account_id,
-            _pad: [0u8; 23],
+            _pad: [0u8; 32],
+            _pad2: [0u8; 23],
             message_kind: MessageKind::Account as u8,
         }
     }
@@ -36,11 +39,11 @@ mod tests {
 
     #[test]
     fn test_account_cast() {
-        let mut bytes = [0u8; 32];
+        let mut bytes = [0u8; 64];
         // account_id: 42 as u64, little-endian at offset 0
         bytes[0..8].copy_from_slice(&42u64.to_le_bytes());
         // message_kind = 0 (Account)
-        bytes[31] = 0;
+        bytes[63] = 0;
 
         let acct: &Account = bytemuck::from_bytes(&bytes);
         assert_eq!(acct.account_id, 42);
@@ -53,7 +56,8 @@ const MAX_BATCH: usize = 100;
 pub struct AccountEntry {
     pub account_id: u64,
     file_backing: File,
-    pub cached_balance: i128,
+    pub debit_balance: u128,
+    pub credit_balance: u128,
     pending_transactions: [Transaction; MAX_BATCH],
     len: usize,
     dirty: bool,
@@ -61,12 +65,21 @@ pub struct AccountEntry {
 
 impl std::fmt::Display for AccountEntry {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(
-            f,
-            "[{}] Balance: ${:.2}",
-            self.account_id,
-            self.cached_balance as f64 / 1000.0
-        )
+        if self.debit_balance > self.credit_balance {
+            write!(
+                f,
+                "[{}] Debit Balance: ${:.2}",
+                self.account_id,
+                (self.debit_balance - self.credit_balance) as f64 / 1000.0,
+            )
+        } else {
+            write!(
+                f,
+                "[{}] Credit Balance: ${:.2}",
+                self.account_id,
+                (self.credit_balance - self.debit_balance) as f64 / 1000.0,
+            )
+        }
     }
 }
 
@@ -78,18 +91,19 @@ impl AccountEntry {
             .append(true)
             .create(true)
             .open(&path)?;
-        let mut cached_balance = 0;
-        let mut buf = [0u8; 32];
+        let mut credit_balance = 0;
+        let mut debit_balance = 0;
+        let mut buf = [0u8; 64];
         loop {
             match f.read_exact(&mut buf) {
                 Ok(_) => {
-                    if buf[31] != MessageKind::Transaction as u8 {
-                        return Err(WeevilError::InvalidMessageKind(buf[31]));
+                    if buf[63] != MessageKind::Transaction as u8 {
+                        return Err(WeevilError::InvalidMessageKind(buf[63]));
                     }
                     let tx = bytemuck::pod_read_unaligned::<Transaction>(&buf);
-                    match tx.kind() {
-                        TransactionKind::Deposit => cached_balance += tx.amount as i128,
-                        TransactionKind::Withdrawal => cached_balance -= tx.amount as i128,
+                    match tx.kind()? {
+                        TransactionKind::Debit => debit_balance += tx.amount,
+                        TransactionKind::Credit => credit_balance += tx.amount,
                     };
                 }
                 Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
@@ -99,7 +113,8 @@ impl AccountEntry {
         Ok(AccountEntry {
             account_id,
             file_backing: f,
-            cached_balance,
+            debit_balance,
+            credit_balance,
             pending_transactions: [Transaction::default(); MAX_BATCH],
             len: 0,
             dirty: false,
@@ -121,9 +136,9 @@ impl AccountEntry {
             &self.pending_transactions[0..self.len],
         ))?;
         for tx in &self.pending_transactions[0..self.len] {
-            match tx.kind() {
-                TransactionKind::Deposit => self.cached_balance += tx.amount as i128,
-                TransactionKind::Withdrawal => self.cached_balance -= tx.amount as i128,
+            match tx.kind()? {
+                TransactionKind::Debit => self.debit_balance += tx.amount,
+                TransactionKind::Credit => self.credit_balance += tx.amount,
             };
         }
         self.len = 0;
@@ -145,34 +160,40 @@ impl AccountEntry {
 
     pub fn response(&self) -> AccountResponse {
         AccountResponse {
-            cached_balance: self.cached_balance,
+            debit_balance: self.debit_balance,
+            credit_balance: self.credit_balance,
             account_id: self.account_id,
-            _pad: [0u8; 7],
+            _pad: [0u8; 23],
             status: 0,
         }
     }
 }
 
+const _: () = assert!(std::mem::size_of::<AccountResponse>() == 64);
+
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
 pub struct AccountResponse {
-    cached_balance: i128,
+    debit_balance: u128,
+    credit_balance: u128,
     account_id: u64,
-    _pad: [u8; 7],
+    _pad: [u8; 23],
     status: u8,
 }
 
 pub const NOT_FOUND: AccountResponse = AccountResponse {
-    cached_balance: 0,
+    debit_balance: 0u128,
+    credit_balance: 0u128,
     account_id: 0,
-    _pad: [0u8; 7],
+    _pad: [0u8; 23],
     status: 1,
 };
 
 pub const CACHE_FULL: AccountResponse = AccountResponse {
-    cached_balance: 0,
+    debit_balance: 0u128,
+    credit_balance: 0u128,
     account_id: 0,
-    _pad: [0u8; 7],
+    _pad: [0u8; 23],
     status: 2,
 };
 
@@ -184,19 +205,19 @@ impl std::fmt::Display for AccountResponse {
             return write!(f, "Server account cache full");
         }
 
-        if self.cached_balance >= 0 {
+        if self.debit_balance > self.credit_balance {
             write!(
                 f,
-                "[{}] ${:.2}",
+                "[{}] Debit Balance: ${:.2}",
                 self.account_id,
-                self.cached_balance as f64 / 1000.0
+                (self.debit_balance - self.credit_balance) as f64 / 1000.0,
             )
         } else {
             write!(
                 f,
-                "[{}] -${:.2}",
+                "[{}] Credit Balance: ${:.2}",
                 self.account_id,
-                self.cached_balance.abs() as f64 / 1000.0
+                (self.credit_balance - self.debit_balance) as f64 / 1000.0,
             )
         }
     }
