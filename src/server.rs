@@ -44,17 +44,21 @@ struct Session {
 }
 
 impl Session {
-    fn handle(&mut self, event: &Event, registry: &Registry) -> Result<ParsedMessage, WeevilError> {
+    fn process_event(
+        &mut self,
+        event: &Event,
+        registry: &Registry,
+    ) -> Result<ParsedMessage, WeevilError> {
         match self.status {
-            SessionStatus::Reading if event.is_readable() => self.handle_read(),
-            SessionStatus::Writing(_) if event.is_writable() => self.handle_write(registry),
+            SessionStatus::Reading if event.is_readable() => self.read_message(),
+            SessionStatus::Writing(_) if event.is_writable() => self.write_response(registry),
             SessionStatus::Closing => Ok(ParsedMessage::Closing),
             SessionStatus::AwaitingCommit(_) => Ok(ParsedMessage::Incomplete), // nothing to do until we hit the disk
             _ => Ok(ParsedMessage::Incomplete), // false trigger on event polling, just try again
         }
     }
 
-    fn handle_read(&mut self) -> Result<ParsedMessage, WeevilError> {
+    fn read_message(&mut self) -> Result<ParsedMessage, WeevilError> {
         loop {
             assert!(self.offset < 64);
             match self.stream.read(&mut self.read_buf.0[self.offset..]) {
@@ -90,7 +94,7 @@ impl Session {
         }
     }
 
-    fn handle_write(&mut self, registry: &Registry) -> Result<ParsedMessage, WeevilError> {
+    fn write_response(&mut self, registry: &Registry) -> Result<ParsedMessage, WeevilError> {
         let old = std::mem::replace(&mut self.status, SessionStatus::Reading);
         let SessionStatus::Writing(data) = old else {
             panic!("session status must be `SessionStatus::Writing(data)`")
@@ -146,7 +150,7 @@ fn main() -> Result<(), WeevilError> {
                 SERVER => accept_connections(&mut server, poll.registry(), &mut connections)?,
                 token => {
                     if let Some(Some(session)) = connections.get_mut(token.0) {
-                        match session.handle(event, poll.registry()) {
+                        match session.process_event(event, poll.registry()) {
                             Ok(ParsedMessage::Closing) => {
                                 if let Ok(addr) = session.stream.peer_addr() {
                                     println!("[{}] Disconnected", addr);
@@ -158,34 +162,10 @@ fn main() -> Result<(), WeevilError> {
                             }
                             Ok(ParsedMessage::Incomplete) => continue,
                             Ok(ParsedMessage::Account(acct)) => {
-                                if let Some(a) = account_entries.get(acct.account_id) {
-                                    println!("{a}");
-                                    // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(cast_response(a.response()));
-                                } else if !account_entries.has_capacity(acct.account_id) {
-                                    println!("account cache full");
-                                    session.stage_response(cast_response(CACHE_FULL));
-                                } else {
-                                    let entry = AccountEntry::new(acct.account_id)?;
-                                    println!("Registering account: {entry}...");
-                                    // guaranteed to succeed — slot was confirmed above
-                                    let entry = account_entries
-                                        .insert(entry)
-                                        .expect("slot vanished after has_capacity");
-                                    println!("Success: {entry}");
-                                    session.stage_response(cast_response(entry.response()));
-                                }
+                                process_account(acct, session, &mut account_entries)?
                             }
                             Ok(ParsedMessage::Transaction(tx)) => {
-                                if let Some(a) = account_entries.get_mut(tx.account_id) {
-                                    println!("Pushing transaction to {a}...");
-                                    a.add_transaction(tx)?;
-                                    // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(cast_response(a.response()));
-                                } else {
-                                    eprintln!("Account [{}] not found...", tx.account_id);
-                                    session.stage_response(cast_response(NOT_FOUND));
-                                }
+                                process_transaction(tx, session, &mut account_entries)?
                             }
                             Err(e) => {
                                 // log the error
@@ -194,6 +174,8 @@ fn main() -> Result<(), WeevilError> {
                                 session.status = SessionStatus::Closing;
                             }
                         }
+                    } else {
+                        eprintln!("Unknown token: {token:?}");
                     }
                 }
             }
@@ -248,6 +230,48 @@ fn accept_connections(
             Err(e) if would_block(&e) => break,
             Err(e) => return Err(e.into()),
         }
+    }
+    Ok(())
+}
+
+fn process_account(
+    acct: Account,
+    session: &mut Session,
+    account_entries: &mut AccountEntryCache,
+) -> Result<(), WeevilError> {
+    if let Some(a) = account_entries.get(acct.account_id) {
+        println!("{a}");
+        // our write_buf is staged, now we wait until fsync is complete before sending
+        session.stage_response(cast_response(a.response()));
+    } else if !account_entries.has_capacity(acct.account_id) {
+        println!("account cache full");
+        session.stage_response(cast_response(CACHE_FULL));
+    } else {
+        let entry = AccountEntry::new(acct.account_id)?;
+        println!("Registering account: {entry}...");
+        // guaranteed to succeed — slot was confirmed above
+        let entry = account_entries
+            .insert(entry)
+            .expect("slot vanished after has_capacity");
+        println!("Success: {entry}");
+        session.stage_response(cast_response(entry.response()));
+    }
+    Ok(())
+}
+
+fn process_transaction(
+    tx: Transaction,
+    session: &mut Session,
+    account_entries: &mut AccountEntryCache,
+) -> Result<(), WeevilError> {
+    if let Some(a) = account_entries.get_mut(tx.account_id) {
+        println!("Pushing transaction to {a}...");
+        a.add_transaction(tx)?;
+        // our write_buf is staged, now we wait until fsync is complete before sending
+        session.stage_response(cast_response(a.response()));
+    } else {
+        eprintln!("Account [{}] not found...", tx.account_id);
+        session.stage_response(cast_response(NOT_FOUND));
     }
     Ok(())
 }
