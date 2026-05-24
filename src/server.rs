@@ -1,11 +1,10 @@
 use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Registry, Token};
-use std::collections::HashMap;
 use std::io::{Read, Write};
 
 use weevil::GenericError;
-use weevil::account::{Account, AccountEntry, AccountResponse};
+use weevil::account::{Account, AccountEntry, AccountResponse, NOT_FOUND};
 use weevil::transaction::Transaction;
 
 const SERVER: Token = Token(0);
@@ -125,12 +124,12 @@ fn main() -> Result<(), GenericError> {
     poll.registry()
         .register(&mut server, SERVER, Interest::READABLE)?;
 
-    const EMPTY: Option<Session> = None;
-    let mut connections = [EMPTY; MAX_CONNECTIONS];
+    const EMPTY_SESSION: Option<Session> = None;
+    let mut connections = [EMPTY_SESSION; MAX_CONNECTIONS];
 
-    // TODO: Replace HashMap with [Option<AccountEntry>; MAX_ACCOUNTS] and use a hash to establish
-    // direct array index. Probably needs cache eviction policy so this might be heavy.
-    let mut account_entries: HashMap<u64, AccountEntry> = HashMap::new();
+    const EMPTY_ACCOUNT_ENTRY: Option<AccountEntry> = None;
+    let mut account_entries: [Option<AccountEntry>; MAX_ACCOUNTS] =
+        [EMPTY_ACCOUNT_ENTRY; MAX_ACCOUNTS];
 
     println!("Waiting to receive Weevil messages on {addr}...");
 
@@ -159,7 +158,8 @@ fn main() -> Result<(), GenericError> {
                             }
                             Ok(ParsedMessage::Incomplete) => continue,
                             Ok(ParsedMessage::Account(acct)) => {
-                                if let Some(a) = account_entries.get(&acct.account_id) {
+                                let idx = get_account_idx(acct.account_id);
+                                if let Some(Some(a)) = account_entries.get(idx) {
                                     println!("{a}");
                                     // our write_buf is staged, now we wait until fsync is complete before sending
                                     session.stage_response(bytemuck::cast::<
@@ -178,12 +178,13 @@ fn main() -> Result<(), GenericError> {
                                         entry.response()
                                     ));
                                     println!("Registering account: {entry}...");
-                                    account_entries.insert(acct.account_id, entry);
+                                    let idx = get_account_idx(acct.account_id);
+                                    account_entries[idx] = Some(entry);
                                 }
                             }
                             Ok(ParsedMessage::Transaction(tx)) => {
-                                let id = tx.account_id;
-                                if let Some(a) = account_entries.get_mut(&id) {
+                                let idx = get_account_idx(tx.account_id);
+                                if let Some(Some(a)) = account_entries.get_mut(idx) {
                                     println!("Pushing transaction to {a}...");
                                     a.add_transaction(tx)?;
                                     // our write_buf is staged, now we wait until fsync is complete before sending
@@ -194,7 +195,13 @@ fn main() -> Result<(), GenericError> {
                                         a.response()
                                     ));
                                 } else {
-                                    eprintln!("Account [{id}] not found...");
+                                    eprintln!("Account [{}] not found...", tx.account_id);
+                                    session.stage_response(bytemuck::cast::<
+                                        AccountResponse,
+                                        [u8; 32],
+                                    >(
+                                        NOT_FOUND
+                                    ));
                                 }
                             }
                             Err(e) => {
@@ -210,7 +217,7 @@ fn main() -> Result<(), GenericError> {
         }
 
         // now that we've collected all our inputs, we push them to disk
-        for entry in account_entries.values_mut() {
+        for entry in account_entries.iter_mut().flatten() {
             entry.flush()?; // has internal check before the syscall
         }
 
@@ -277,4 +284,10 @@ fn would_block(err: &std::io::Error) -> bool {
 
 fn interrupted(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::Interrupted
+}
+
+fn get_account_idx(acct_id: u64) -> usize {
+    // TODO: this is ripe for collisions and will need to be addressed with
+    // linear probing
+    (acct_id % MAX_ACCOUNTS as u64) as usize
 }

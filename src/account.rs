@@ -145,21 +145,33 @@ impl AccountEntry {
         AccountResponse {
             cached_balance: self.cached_balance,
             account_id: self.account_id,
-            _pad: [0u8; 8],
+            _pad: [0u8; 7],
+            status: 0,
         }
     }
 }
 
 #[repr(C)]
-#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
 pub struct AccountResponse {
     cached_balance: i128,
     account_id: u64,
-    _pad: [u8; 8],
+    _pad: [u8; 7],
+    status: u8,
 }
+
+pub const NOT_FOUND: AccountResponse = AccountResponse {
+    cached_balance: 0,
+    account_id: 0,
+    _pad: [0u8; 7],
+    status: 1,
+};
 
 impl std::fmt::Display for AccountResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        if self.status != 0 {
+            return write!(f, "Account not found");
+        }
         if self.cached_balance >= 0 {
             write!(
                 f,

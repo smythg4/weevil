@@ -42,13 +42,16 @@ All messages are 32 bytes. Client-to-server messages are distinguished by the fi
 |---|---|---|
 | 0–15 | cached_balance | i128 |
 | 16–23 | account_id | u64 |
-| 24–31 | padding | [u8; 8] |
+| 24–30 | padding | [u8; 7] |
+| 31 | status | u8 |
 
-The response reflects the committed balance at the previous flush boundary — the pending transaction has been accepted into the batch but `cached_balance` is updated when the batch is written to disk, not at enqueue time.
+The response reflects the committed balance at the previous flush boundary — the pending transaction has been accepted into the batch but `cached_balance` is updated when the batch is written to disk, not at enqueue time. `status` is 0
+for success responses, 1 represents account not found.
 
 ## Running
 
 ```sh
+# make the data directory if required
 mkdir data_files
 # start the server
 cargo run --bin server
@@ -65,7 +68,8 @@ Weevil omits most of what makes TigerBeetle production-worthy: explicit error ty
 
 ## Next Steps
 
-- **Complete static allocation** — `account_entries` is the last `HashMap`. Replace it with a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array indexed by an open-addressing hash of `account_id`. Unlike connections, account IDs are arbitrary `u64` values from the client, so a direct index isn't possible — linear probing on collision, no tombstones needed since accounts are never deleted. ([A Database Without Dynamic Memory Allocation](https://tigerbeetle.com/blog/2022-10-12-a-database-without-dynamic-memory/))
+- **Fix Account Entry Keys** — `account_entries` is keyed simply by modding the `account_id` `u64` by the `MAX_ACCOUNTS`.
+Need to do some collision detection and linear scanning to make this work properly.
 
 - **Separate credits and debits** — replace `cached_balance: i128` with `credits_posted: u128` and `debits_posted: u128`. Signed balance hides transaction volume and introduces sign ambiguity. Eliminate `as f64` in `Display` — use integer arithmetic for all money formatting. ([64-Bit Bank Balances 'Ought to be Enough for Anybody'?](https://tigerbeetle.com/blog/2023-09-19-64-bit-bank-balances-ought-to-be-enough-for-anybody))
 
