@@ -161,20 +161,10 @@ fn main() -> Result<(), WeevilError> {
                                 if let Some(a) = account_entries.get(acct.account_id) {
                                     println!("{a}");
                                     // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(bytemuck::cast::<
-                                        AccountResponse,
-                                        [u8; 64],
-                                    >(
-                                        a.response()
-                                    ));
+                                    session.stage_response(cast_response(a.response()));
                                 } else if !account_entries.has_capacity(acct.account_id) {
                                     println!("account cache full");
-                                    session.stage_response(bytemuck::cast::<
-                                        AccountResponse,
-                                        [u8; 64],
-                                    >(
-                                        CACHE_FULL
-                                    ));
+                                    session.stage_response(cast_response(CACHE_FULL));
                                 } else {
                                     let entry = AccountEntry::new(acct.account_id)?;
                                     println!("Registering account: {entry}...");
@@ -183,12 +173,7 @@ fn main() -> Result<(), WeevilError> {
                                         .insert(entry)
                                         .expect("slot vanished after has_capacity");
                                     println!("Success: {entry}");
-                                    session.stage_response(bytemuck::cast::<
-                                        AccountResponse,
-                                        [u8; 64],
-                                    >(
-                                        entry.response()
-                                    ));
+                                    session.stage_response(cast_response(entry.response()));
                                 }
                             }
                             Ok(ParsedMessage::Transaction(tx)) => {
@@ -196,20 +181,10 @@ fn main() -> Result<(), WeevilError> {
                                     println!("Pushing transaction to {a}...");
                                     a.add_transaction(tx)?;
                                     // our write_buf is staged, now we wait until fsync is complete before sending
-                                    session.stage_response(bytemuck::cast::<
-                                        AccountResponse,
-                                        [u8; 64],
-                                    >(
-                                        a.response()
-                                    ));
+                                    session.stage_response(cast_response(a.response()));
                                 } else {
                                     eprintln!("Account [{}] not found...", tx.account_id);
-                                    session.stage_response(bytemuck::cast::<
-                                        AccountResponse,
-                                        [u8; 64],
-                                    >(
-                                        NOT_FOUND
-                                    ));
+                                    session.stage_response(cast_response(NOT_FOUND));
                                 }
                             }
                             Err(e) => {
@@ -295,6 +270,9 @@ fn interrupted(err: &std::io::Error) -> bool {
     err.kind() == std::io::ErrorKind::Interrupted
 }
 
+fn cast_response(r: AccountResponse) -> [u8; 64] {
+    bytemuck::cast::<AccountResponse, [u8; 64]>(r)
+}
 struct AccountEntryCache {
     entries: [Option<AccountEntry>; MAX_ACCOUNTS],
 }
