@@ -127,4 +127,9 @@ impl AccountEntry {
         }
         Ok(())
     }
+
+    pub fn flush(&mut self) -> Result<(), GenericError> {
+        self.write()?;
+        self.sync()
+    }
 }

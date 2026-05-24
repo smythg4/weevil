@@ -10,6 +10,9 @@ use weevil::transaction::Transaction;
 
 const SERVER: Token = Token(0);
 
+const MAX_CONNECTIONS: usize = 32;
+const MAX_ACCOUNTS: usize = 1024;
+
 enum ParsedMessage {
     Account(Account),
     Transaction(Transaction),
@@ -17,15 +20,15 @@ enum ParsedMessage {
     Closing,
 }
 
-// TODO: Consider storing the pending write buffer in `AwaitingCommit` and `Writing`
 #[derive(Eq, PartialEq)]
 enum SessionStatus {
     Reading,
-    AwaitingCommit,
-    Writing,
+    AwaitingCommit(Vec<u8>),
+    Writing(Vec<u8>),
     Closing,
 }
 
+#[derive(Default)]
 #[repr(C, align(16))]
 struct AlignedBuf([u8; 32]);
 
@@ -33,7 +36,6 @@ struct Session {
     stream: TcpStream,
     read_buf: AlignedBuf,
     bytes_read: usize,
-    write_buf: Option<Vec<u8>>,
     status: SessionStatus,
     token: Token,
 }
@@ -46,15 +48,14 @@ impl Session {
     ) -> Result<ParsedMessage, GenericError> {
         match self.status {
             SessionStatus::Reading if event.is_readable() => self.handle_read(),
-            SessionStatus::Writing if event.is_writable() => self.handle_write(registry),
+            SessionStatus::Writing(_) if event.is_writable() => self.handle_write(registry),
             SessionStatus::Closing => Ok(ParsedMessage::Closing),
-            SessionStatus::AwaitingCommit => Ok(ParsedMessage::Incomplete), // nothing to do until we hit the disk
+            SessionStatus::AwaitingCommit(_) => Ok(ParsedMessage::Incomplete), // nothing to do until we hit the disk
             _ => Ok(ParsedMessage::Incomplete), // false trigger on event polling, just try again
         }
     }
 
     fn handle_read(&mut self) -> Result<ParsedMessage, GenericError> {
-        let mut result = ParsedMessage::Incomplete;
         loop {
             match self.stream.read(&mut self.read_buf.0) {
                 Ok(0) => {
@@ -64,7 +65,7 @@ impl Session {
                 Ok(n) => {
                     self.bytes_read += n;
                     if self.bytes_read == 32 {
-                        result = match self.read_buf.0[31] {
+                        let result = match self.read_buf.0[31] {
                             0 => {
                                 let acct: &Account = bytemuck::from_bytes(&self.read_buf.0);
                                 ParsedMessage::Account(*acct)
@@ -79,25 +80,28 @@ impl Session {
                         return Ok(result);
                     }
                 }
-                Err(e) if would_block(&e) => return Ok(result),
+                Err(e) if would_block(&e) => return Ok(ParsedMessage::Incomplete),
                 Err(e) if interrupted(&e) => continue,
-                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => return Ok(result),
+                Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
+                    return Ok(ParsedMessage::Closing);
+                }
                 Err(e) => return Err(e.into()),
             }
         }
     }
 
     fn handle_write(&mut self, registry: &Registry) -> Result<ParsedMessage, GenericError> {
-        let data = self
-            .write_buf
-            .take()
-            .expect("write_buf must be Some in Writing state");
+        let old = std::mem::replace(&mut self.status, SessionStatus::Reading);
+        let SessionStatus::Writing(data) = old else {
+            panic!("write_buf must be Some in Writing state")
+        };
         match self.stream.write_all(&data) {
             Ok(()) => {
-                self.status = SessionStatus::Reading;
                 registry.reregister(&mut self.stream, self.token, Interest::READABLE)?;
             }
-            Err(e) if would_block(&e) || interrupted(&e) => self.write_buf = Some(data),
+            Err(e) if would_block(&e) || interrupted(&e) => {
+                self.status = SessionStatus::Writing(data);
+            }
             Err(e) if e.kind() == std::io::ErrorKind::ConnectionReset => {
                 self.status = SessionStatus::Closing;
                 return Ok(ParsedMessage::Incomplete);
@@ -105,6 +109,10 @@ impl Session {
             Err(e) => return Err(e.into()),
         }
         Ok(ParsedMessage::Incomplete)
+    }
+
+    fn stage_response(&mut self, response: Vec<u8>) {
+        self.status = SessionStatus::AwaitingCommit(response);
     }
 }
 
@@ -118,10 +126,8 @@ fn main() -> Result<(), GenericError> {
     poll.registry()
         .register(&mut server, SERVER, Interest::READABLE)?;
 
-    // TODO: Replace HashMap with [Option<Session>; MAX_CONNECTIONS] and use the token value as a
-    // direct array index
-    let mut connections = HashMap::new();
-    let mut unique_token = Token(SERVER.0 + 1);
+    const EMPTY: Option<Session> = None;
+    let mut connections = [EMPTY; MAX_CONNECTIONS];
 
     // TODO: Replace HashMap with [Option<AccountEntry>; MAX_ACCOUNTS] and use a hash to establish
     // direct array index. Probably needs cache eviction policy so this might be heavy.
@@ -139,14 +145,9 @@ fn main() -> Result<(), GenericError> {
 
         for event in &events {
             match event.token() {
-                SERVER => accept_connections(
-                    &mut server,
-                    poll.registry(),
-                    &mut connections,
-                    &mut unique_token,
-                )?,
+                SERVER => accept_connections(&mut server, poll.registry(), &mut connections)?,
                 token => {
-                    if let Some(session) = connections.get_mut(&token) {
+                    if let Some(Some(session)) = connections.get_mut(token.0) {
                         match session.handle(event, poll.registry()) {
                             Ok(ParsedMessage::Closing) => {
                                 if let Ok(addr) = session.stream.peer_addr() {
@@ -155,7 +156,7 @@ fn main() -> Result<(), GenericError> {
                                     println!("[UNKNOWN CLIENT] Disconnected");
                                 }
                                 poll.registry().deregister(&mut session.stream)?;
-                                connections.remove(&token);
+                                connections[token.0] = None;
                             }
                             Ok(ParsedMessage::Incomplete) => continue,
                             Ok(ParsedMessage::Account(acct)) => {
@@ -163,17 +164,17 @@ fn main() -> Result<(), GenericError> {
                                     // TODO: Establish fixed sized response format
                                     let response = format!("[SERVER] {a}\n");
                                     print!("{response}");
-                                    session.write_buf = Some(response.into_bytes());
+                                    // our write_buf is staged, now we wait until fsync is complete before sending
+                                    session.stage_response(response.into_bytes());
                                 } else {
                                     let entry = AccountEntry::new(acct.account_id)?;
                                     let response =
                                         format!("[SERVER] Registering account: {entry}...\n");
                                     account_entries.insert(acct.account_id, entry);
                                     print!("{response}");
-                                    session.write_buf = Some(response.into_bytes())
+                                    // our write_buf is staged, now we wait until fsync is complete before sending
+                                    session.stage_response(response.into_bytes());
                                 }
-                                // our write_buf is staged, now we wait until fsync is complete before sending
-                                session.status = SessionStatus::AwaitingCommit;
                             }
                             Ok(ParsedMessage::Transaction(tx)) => {
                                 let id = tx.account_id;
@@ -181,15 +182,15 @@ fn main() -> Result<(), GenericError> {
                                     let response =
                                         format!("[SERVER] Pushing transaction to {a}...\n");
                                     print!("{response}");
-                                    session.write_buf = Some(response.into_bytes());
+                                    // our write_buf is staged, now we wait until fsync is complete before sending
+                                    session.stage_response(response.into_bytes());
                                     a.add_transaction(tx);
                                 } else {
                                     let response = format!("Account [{id}] not found...\n");
                                     print!("{response}");
-                                    session.write_buf = Some(response.into_bytes());
+                                    // our write_buf is staged, now we wait until fsync is complete before sending
+                                    session.stage_response(response.into_bytes());
                                 }
-                                // our write_buf is staged, now we wait until fsync is complete before sending
-                                session.status = SessionStatus::AwaitingCommit;
                             }
                             Err(e) => {
                                 // log the error
@@ -203,19 +204,26 @@ fn main() -> Result<(), GenericError> {
             }
         }
 
+        // now that we've collected all our inputs, we push them to disk
         for entry in account_entries.values_mut() {
-            entry.write()?;
-            entry.sync()?;
+            entry.flush()?; // has internal check before the syscall
         }
 
         // find all the AwaitingCommit sessions
-        for (t, s) in connections
+        // now we notify the client that their transaction is durable on disk
+        for s in connections
             .iter_mut()
-            .filter(|(_, s)| s.status == SessionStatus::AwaitingCommit)
+            .flatten()
+            .filter(|s| matches!(s.status, SessionStatus::AwaitingCommit(_)))
         {
-            s.status = SessionStatus::Writing;
+            let old = std::mem::replace(&mut s.status, SessionStatus::Reading);
+            if let SessionStatus::AwaitingCommit(data) = old {
+                s.status = SessionStatus::Writing(data);
+            } else {
+                unreachable!();
+            }
             poll.registry()
-                .reregister(&mut s.stream, *t, Interest::WRITABLE)?;
+                .reregister(&mut s.stream, s.token, Interest::WRITABLE)?;
         }
     }
 }
@@ -223,26 +231,23 @@ fn main() -> Result<(), GenericError> {
 fn accept_connections(
     server: &mut TcpListener,
     registry: &Registry,
-    connections: &mut HashMap<Token, Session>,
-    unique_token: &mut Token,
+    connections: &mut [Option<Session>; MAX_CONNECTIONS],
 ) -> Result<(), GenericError> {
     loop {
         match server.accept() {
-            Ok((mut stream, address)) => {
-                println!("[{}] Connection received", address);
-                let token = next_token(unique_token);
+            Ok((mut stream, address)) if let Some(token) = next_token(connections) => {
+                eprintln!("[{}] Connection received", address);
                 registry.register(&mut stream, token, Interest::READABLE)?;
-                connections.insert(
+                connections[token.0] = Some(Session {
+                    stream,
+                    read_buf: AlignedBuf::default(),
+                    bytes_read: 0,
+                    status: SessionStatus::Reading,
                     token,
-                    Session {
-                        stream,
-                        read_buf: AlignedBuf([0u8; 32]),
-                        bytes_read: 0,
-                        write_buf: None,
-                        status: SessionStatus::Reading,
-                        token,
-                    },
-                );
+                });
+            }
+            Ok((_, _)) => {
+                eprintln!("Connections pool full, dropping...");
             }
             Err(e) if would_block(&e) => break,
             Err(e) => return Err(e.into()),
@@ -251,10 +256,14 @@ fn accept_connections(
     Ok(())
 }
 
-fn next_token(current: &mut Token) -> Token {
-    let next = current.0;
-    current.0 += 1;
-    Token(next)
+fn next_token(connections: &[Option<Session>; MAX_CONNECTIONS]) -> Option<Token> {
+    // reserve slot 0 for the SERVER connection
+    let (next, _) = connections
+        .iter()
+        .enumerate()
+        .skip(1)
+        .find(|(_, s)| s.is_none())?;
+    Some(Token(next))
 }
 
 fn would_block(err: &std::io::Error) -> bool {
