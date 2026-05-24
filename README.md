@@ -8,18 +8,17 @@ Weevil is a single-threaded TCP server that accepts financial transactions from 
 
 ## Concepts explored
 
-- **Zero-copy wire protocol** — all messages are fixed 32-byte `#[repr(C)]` structs cast directly from network buffers using `bytemuck`. No serialization layer. Responses are the same: a fixed 32-byte `AccountResponse` struct cast directly to the wire.
+- **Zero-copy wire protocol** — all messages are fixed 64-byte `#[repr(C)]` structs cast directly from network buffers using `bytemuck`. No serialization layer. Responses are the same: a fixed 64-byte `AccountResponse` struct cast directly to the wire.
 - **Non-blocking I/O** — a single-threaded `mio` event loop handles multiple concurrent connections without threads.
 - **Append-only durable storage** — transactions are written as raw bytes to per-account `.log` files and flushed with `fdatasync` at the end of each event loop batch.
 - **Batch commit with response ordering** — transactions accumulate across one poll iteration. At the end of each iteration, dirty account logs are written and flushed with `fdatasync`. Only after the flush completes are sessions promoted from `AwaitingCommit` to `Writing`, guaranteeing no client receives a response before its transaction is durable on disk.
 - **Separate debit and credit accumulators** — `AccountEntry` tracks `debit_balance: u128` and `credit_balance: u128` as independent unsigned accumulators rather than a single signed balance. Unsigned types cannot go negative, transaction volume is preserved in both directions, and the net balance is derived by comparison and safe subtraction at display time. Matches the TigerBeetle model. ([64-Bit Bank Balances 'Ought to be Enough for Anybody'?](https://tigerbeetle.com/blog/2023-09-19-64-bit-bank-balances-ought-to-be-enough-for-anybody))
 - **Batched disk writes** — all pending transactions for an account are written in a single `write_all(bytemuck::cast_slice(...))` call rather than one syscall per transaction. `bytemuck::cast_slice` reinterprets the contiguous `[Transaction; N]` array as a flat `&[u8]` with no copying.
-- **Balance replay** — on startup, each account's balance is reconstructed by replaying its log file 32 bytes at a time.
+- **Balance replay** — on startup, each account's balance is reconstructed by replaying its log file 64 bytes at a time.
 - **Static connection table** — connections are stored in a fixed `[Option<Session>; MAX_CONNECTIONS]` array. The mio `Token` is a direct array index. No `HashMap`, no hashing, no pointer chasing — O(1) lookup by design.
 - **Static account cache with open addressing** — accounts are stored in a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array. Slot selection uses modulo hashing with linear probing and full wrap-around — no `HashMap`, no heap allocation. `MAX_ACCOUNTS` is prime (257) to reduce probe clustering.
 - **Static pending transaction buffer** — each `AccountEntry` holds a `[Transaction; MAX_BATCH]` array with a `len` counter. No `Vec`, no heap growth. When the batch is full, `add_transaction` returns an error rather than flushing inline, preserving the batch commit guarantee.
-- **Type-state response buffer** — `SessionStatus::AwaitingCommit([u8; 32])` and `Writing([u8; 32])` carry the response payload inside the state. The type system enforces that a session cannot be in `Writing` state without a response ready to send. No separate `write_buf` field, no `Option` to unwrap.
-- **TCP_NODELAY** — set on every accepted connection. With 32-byte messages, Nagle's algorithm would buffer responses and add per-message latency. `TCP_NODELAY` ensures responses are sent immediately after the fsync completes.
+- **Type-state response buffer** — `SessionStatus::AwaitingCommit([u8; 64])` and `Writing([u8; 64])` carry the response payload inside the state. The type system enforces that a session cannot be in `Writing` state without a response ready to send. No separate `write_buf` field, no `Option` to unwrap.
 
 ## Protocol
 
@@ -78,7 +77,7 @@ Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, check
 
 - **Assertion discipline** — `tx.kind()` uses `unreachable!()` on the `transaction_kind` byte from disk during log replay. A corrupt byte is external data, not an internal invariant violation — it should return a soft error rather than panic. ([Asserting Implications](https://tigerbeetle.com/blog/2025-05-26-asserting-implications/))
 
-- **Copy hunting** — `ParsedMessage::Transaction(*tx)` copies 32 bytes out of the aligned read buffer on every transaction message. Use LLVM IR to find remaining copies systematically. ([Copy Hunting](https://tigerbeetle.com/blog/2023-07-26-copy-hunting/))
+- **Copy hunting** — `ParsedMessage::Transaction(*tx)` copies 64 bytes out of the aligned read buffer on every transaction message. Use LLVM IR to find remaining copies systematically. ([Copy Hunting](https://tigerbeetle.com/blog/2023-07-26-copy-hunting/))
 
 - **CRC32 checksums** — repurpose padding bytes in `Transaction` and `Account` into a `checksum: u32` field. Compute over the remaining bytes; verify on ingress (network) and during log replay. Expanding to 64-byte structs resolves alignment constraints cleanly. Implement using the Hacker's Delight bitwise CRC32 approach — table-free, branch-light, no dependencies.
 
