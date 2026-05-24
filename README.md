@@ -75,10 +75,4 @@ Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, check
 
 ## Next Steps
 
-- **Assertion discipline** — `tx.kind()` uses `unreachable!()` on the `transaction_kind` byte from disk during log replay. A corrupt byte is external data, not an internal invariant violation — it should return a soft error rather than panic. ([Asserting Implications](https://tigerbeetle.com/blog/2025-05-26-asserting-implications/))
-
-- **Copy hunting** — `ParsedMessage::Transaction(*tx)` copies 64 bytes out of the aligned read buffer on every transaction message. Use LLVM IR to find remaining copies systematically. ([Copy Hunting](https://tigerbeetle.com/blog/2023-07-26-copy-hunting/))
-
 - **CRC32 checksums** — repurpose padding bytes in `Transaction` and `Account` into a `checksum: u32` field. Compute over the remaining bytes; verify on ingress (network) and during log replay. Expanding to 64-byte structs resolves alignment constraints cleanly. Implement using the Hacker's Delight bitwise CRC32 approach — table-free, branch-light, no dependencies.
-
-- **io_uring** — `mio` uses a readiness model (kernel signals fd is ready, userland makes the syscall). `io_uring` uses a completion model (userland submits I/O, kernel does the syscall). Eliminates the context switch on the syscall itself. Significant architectural change but the direction TigerBeetle went. ([A Programmer-Friendly I/O Abstraction Over io_uring and kqueue](https://tigerbeetle.com/blog/2022-11-23-a-friendly-abstraction-over-iouring-and-kqueue))
