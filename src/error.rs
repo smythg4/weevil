@@ -10,4 +10,7 @@ pub enum WeevilError {
 
     #[error("pending transactions full")]
     PendingTransactionsFull,
+
+    #[error("checksum failed")]
+    ChecksumFailed,
 }

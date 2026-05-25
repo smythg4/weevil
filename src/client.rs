@@ -14,6 +14,7 @@ fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), Weevil
     let mut buffer = [0u8; 64];
     conn.read_exact(&mut buffer)?;
     let response: &AccountResponse = bytemuck::from_bytes(&buffer);
+    response.verify()?;
     println!("[SERVER] {response}");
     Ok(())
 }

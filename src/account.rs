@@ -2,28 +2,44 @@ use bytemuck::{Pod, Zeroable};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Write};
 
-use crate::MessageKind;
 use crate::WeevilError;
 use crate::transaction::{Transaction, TransactionKind};
+use crate::{MessageKind, crc32};
 
 const _: () = assert!(std::mem::size_of::<Account>() == 64);
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Account {
     pub account_id: u64,
-    _pad: [u8; 32],
+    _pad: [u8; 28],
+    pub checksum: u32,
     _pad2: [u8; 23],
     message_kind: u8,
 }
 
 impl Account {
     pub fn new(account_id: u64) -> Self {
-        Account {
+        let mut a = Account {
             account_id,
-            _pad: [0u8; 32],
+            _pad: [0u8; 28],
+            checksum: 0,
             _pad2: [0u8; 23],
             message_kind: MessageKind::Account as u8,
+        };
+        let checksum = crc32(bytemuck::bytes_of(&a));
+        a.checksum = checksum;
+        a
+    }
+
+    pub fn verify(&self) -> Result<(), WeevilError> {
+        let mut copy = *self;
+        let old_checksum = copy.checksum;
+        copy.checksum = 0;
+        let checksum = crc32(bytemuck::bytes_of(&copy));
+        if checksum == old_checksum {
+            return Ok(());
         }
+        Err(WeevilError::ChecksumFailed)
     }
 }
 
@@ -33,26 +49,7 @@ impl std::fmt::Display for Account {
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_account_cast() {
-        let mut bytes = [0u8; 64];
-        // account_id: 42 as u64, little-endian at offset 0
-        bytes[0..8].copy_from_slice(&42u64.to_le_bytes());
-        // message_kind = 0 (Account)
-        bytes[63] = 0;
-
-        let acct: &Account = bytemuck::from_bytes(&bytes);
-        assert_eq!(acct.account_id, 42);
-        assert_eq!(acct.message_kind, MessageKind::Account as u8);
-    }
-}
-
 const MAX_BATCH: usize = 100;
-
 pub struct AccountEntry {
     pub account_id: u64,
     file_backing: File,
@@ -101,6 +98,7 @@ impl AccountEntry {
                         return Err(WeevilError::InvalidMessageKind(buf[63]));
                     }
                     let tx = bytemuck::pod_read_unaligned::<Transaction>(&buf);
+                    tx.verify()?;
                     match tx.kind()? {
                         TransactionKind::Debit => debit_balance += tx.amount,
                         TransactionKind::Credit => credit_balance += tx.amount,
@@ -159,13 +157,17 @@ impl AccountEntry {
     }
 
     pub fn response(&self) -> AccountResponse {
-        AccountResponse {
+        let mut ar = AccountResponse {
             debit_balance: self.debit_balance,
             credit_balance: self.credit_balance,
             account_id: self.account_id,
-            _pad: [0u8; 23],
+            checksum: 0,
+            _pad: [0u8; 19],
             status: 0,
-        }
+        };
+        let checksum = crc32(bytemuck::bytes_of(&ar));
+        ar.checksum = checksum;
+        ar
     }
 }
 
@@ -177,15 +179,32 @@ pub struct AccountResponse {
     debit_balance: u128,
     credit_balance: u128,
     account_id: u64,
-    _pad: [u8; 23],
+    pub checksum: u32,
+    _pad: [u8; 19],
     status: u8,
 }
 
+impl AccountResponse {
+    pub fn verify(&self) -> Result<(), WeevilError> {
+        let mut copy = *self;
+        let old_checksum = copy.checksum;
+        copy.checksum = 0;
+        let checksum = crc32(bytemuck::bytes_of(&copy));
+        if checksum == old_checksum {
+            return Ok(());
+        }
+        Err(WeevilError::ChecksumFailed)
+    }
+}
+
+// NOTE: These checksums will fail to check if the struct changes
+// Consider lazy static initialization or functions to return them.
 pub const NOT_FOUND: AccountResponse = AccountResponse {
     debit_balance: 0u128,
     credit_balance: 0u128,
     account_id: 0,
-    _pad: [0u8; 23],
+    checksum: 0x028A53A0,
+    _pad: [0u8; 19],
     status: 1,
 };
 
@@ -193,9 +212,11 @@ pub const CACHE_FULL: AccountResponse = AccountResponse {
     debit_balance: 0u128,
     credit_balance: 0u128,
     account_id: 0,
-    _pad: [0u8; 23],
+    checksum: 0x9B83021A,
+    _pad: [0u8; 19],
     status: 2,
 };
+// End checksum note
 
 impl std::fmt::Display for AccountResponse {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -220,5 +241,35 @@ impl std::fmt::Display for AccountResponse {
                 (self.credit_balance - self.debit_balance) as f64 / 1000.0,
             )
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_account_cast() {
+        let mut bytes = [0u8; 64];
+        // account_id: 42 as u64, little-endian at offset 0
+        bytes[0..8].copy_from_slice(&42u64.to_le_bytes());
+        // message_kind = 0 (Account)
+        bytes[63] = 0;
+
+        let acct: Account = bytemuck::pod_read_unaligned(&bytes);
+        assert_eq!(acct.account_id, 42);
+        assert_eq!(acct.message_kind, MessageKind::Account as u8);
+    }
+
+    #[test]
+    fn test_not_found_checksum() {
+        let response: &AccountResponse = bytemuck::from_bytes(bytemuck::bytes_of(&NOT_FOUND));
+        assert!(response.verify().is_ok());
+    }
+
+    #[test]
+    fn test_cache_full_checksum() {
+        let response: &AccountResponse = bytemuck::from_bytes(bytemuck::bytes_of(&CACHE_FULL));
+        assert!(response.verify().is_ok());
     }
 }

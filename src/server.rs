@@ -72,10 +72,12 @@ impl Session {
                         let result = match self.read_buf.0[63] {
                             0 => {
                                 let acct: &Account = bytemuck::from_bytes(&self.read_buf.0);
+                                acct.verify()?;
                                 ParsedMessage::Account(*acct)
                             }
                             1 => {
                                 let tx: &Transaction = bytemuck::from_bytes(&self.read_buf.0);
+                                tx.verify()?;
                                 ParsedMessage::Transaction(*tx)
                             }
                             _ => return Err(WeevilError::InvalidMessageKind(self.read_buf.0[63])),

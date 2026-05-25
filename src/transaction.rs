@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::{MessageKind, WeevilError};
+use crate::{MessageKind, WeevilError, crc32};
 
 #[repr(u8)]
 pub enum TransactionKind {
@@ -28,21 +28,26 @@ pub struct Transaction {
     pub amount: u128,
     pub account_id: u64,
     transaction_kind: u8,
-    _pad: [u8; 32],
-    _pad2: [u8; 6],
+    _pad: [u8; 3],
+    pub checksum: u32,
+    _pad2: [u8; 31],
     message_kind: u8,
 }
 
 impl Transaction {
     pub fn new(amount: u128, account_id: u64, transaction_kind: TransactionKind) -> Self {
-        Transaction {
+        let mut tx = Transaction {
             amount,
             account_id,
             transaction_kind: transaction_kind as u8,
             message_kind: MessageKind::Transaction as u8,
-            _pad: [0u8; 32],
-            _pad2: [0u8; 6],
-        }
+            _pad: [0u8; 3],
+            checksum: 0,
+            _pad2: [0u8; 31],
+        };
+        let checksum = crc32(bytemuck::bytes_of(&tx));
+        tx.checksum = checksum;
+        tx
     }
 
     pub fn kind(&self) -> Result<TransactionKind, WeevilError> {
@@ -51,6 +56,17 @@ impl Transaction {
             1 => Ok(TransactionKind::Credit),
             _ => Err(WeevilError::InvalidMessageKind(self.transaction_kind)),
         }
+    }
+
+    pub fn verify(&self) -> Result<(), WeevilError> {
+        let mut copy = *self;
+        let old_checksum = copy.checksum;
+        copy.checksum = 0;
+        let checksum = crc32(bytemuck::bytes_of(&copy));
+        if checksum == old_checksum {
+            return Ok(());
+        }
+        Err(WeevilError::ChecksumFailed)
     }
 }
 
@@ -83,7 +99,7 @@ mod tests {
         // message_kind = 1 (Transaction)
         bytes[63] = 1;
 
-        let tx: &Transaction = bytemuck::from_bytes(&bytes);
+        let tx: Transaction = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(tx.amount, 1000);
         assert_eq!(tx.account_id, 42);
         assert_eq!(tx.transaction_kind, 1);

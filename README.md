@@ -19,6 +19,7 @@ Weevil is a single-threaded TCP server that accepts financial transactions from 
 - **Static account cache with open addressing** — accounts are stored in a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array. Slot selection uses modulo hashing with linear probing and full wrap-around — no `HashMap`, no heap allocation. `MAX_ACCOUNTS` is prime (257) to reduce probe clustering.
 - **Static pending transaction buffer** — each `AccountEntry` holds a `[Transaction; MAX_BATCH]` array with a `len` counter. No `Vec`, no heap growth. When the batch is full, `add_transaction` returns an error rather than flushing inline, preserving the batch commit guarantee.
 - **Type-state response buffer** — `SessionStatus::AwaitingCommit([u8; 64])` and `Writing([u8; 64])` carry the response payload inside the state. The type system enforces that a session cannot be in `Writing` state without a response ready to send. No separate `write_buf` field, no `Option` to unwrap.
+- **CRC32 checksums** — every wire message and every log record carries a CRC32 checksum in repurposed padding bytes. Computed in `new()` with the checksum field zeroed, verified on network ingress and during startup log replay. Implemented using the Hacker's Delight bitwise approach — reflected polynomial `0xEDB88320`, table-free, no dependencies.
 
 ## Protocol
 
@@ -77,4 +78,3 @@ Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, check
 
 - **Single WAL file** — currently performing N fsyncs per event loop iteration, one per dirty account. Consolidating all transactions into a single append-only `wal.log` reduces that to one fsync per batch regardless of how many accounts were touched. Will require reworking the startup replay logic and removing the per-account file handle from `AccountEntry`.
 
-- **CRC32 checksums** — repurpose padding bytes in `Transaction` and `Account` into a `checksum: u32` field. Compute over the remaining bytes; verify on ingress (network) and during log replay. Expanding to 64-byte structs resolves alignment constraints cleanly. Implement using the Hacker's Delight bitwise CRC32 approach — table-free, branch-light, no dependencies.
