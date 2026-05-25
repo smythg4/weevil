@@ -84,3 +84,6 @@ Transaction history is not preserved — the WAL is truncated after each checkpo
 
 - **Transaction IDs for idempotency** — add a `txid: u64` field to `Transaction`, repurposed from padding. Clients assign an ID to each transaction; the server echoes it back in `AccountResponse`. Duplicate submissions with the same ID can be detected and rejected, making retries safe.
 
+- **Transfer Types** - Change `Transaction` to `Transfer` that contains `credit_account_id`: `u64` and `debit_account_id`: `u64`. Current 64-byte structure has room for it. Processing `Transfer` involves updating both `Account`s. Will require a rewrite of the replay logic for `AccountEntryCache`. Replay logic can also enforce total
+debits = total credits.
+

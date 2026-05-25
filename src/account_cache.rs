@@ -5,6 +5,8 @@ use crate::transaction::{Transaction, TransactionKind};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
+const MAX_WAL_SIZE: u64 = 1_000_000;
+
 pub struct AccountEntryCache {
     entries: [Option<AccountEntry>; MAX_ACCOUNTS],
     file_backing: File,
@@ -144,7 +146,7 @@ impl AccountEntryCache {
         if needs_sync {
             self.file_backing.sync_data()?;
         }
-        if self.file_backing.metadata()?.len() > 1_000_000 {
+        if self.file_backing.metadata()?.len() > MAX_WAL_SIZE {
             self.checkpoint()?;
         }
         Ok(())
