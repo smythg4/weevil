@@ -6,8 +6,8 @@ use weevil::WeevilError;
 use weevil::account::{Account, AccountResponse};
 use weevil::transaction::{Transaction, TransactionKind};
 
-const NUM_THREADS: usize = 4;
-const NUM_TRANSACTIONS: usize = 100;
+const NUM_THREADS: usize = 10;
+const NUM_TRANSACTIONS: usize = 1000;
 
 fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), WeevilError> {
     conn.write_all(outbound)?;

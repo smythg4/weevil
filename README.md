@@ -33,11 +33,15 @@ All messages are 64 bytes. Client-to-server messages are distinguished by the fi
 | 0–15 | amount | u128 |
 | 16–23 | account_id | u64 |
 | 24 | transaction_kind (0=debit, 1=credit) | u8 |
-| 25–62 | padding | [u8; 38] |
+| 25–27 | padding | [u8; 3] |
+| 28–31 | checksum | u32 |
+| 32–62 | padding | [u8; 31] |
 | 63 | message_kind = 1 | u8 |
 | **Account** (`message_kind = 0`) | | |
 | 0–7 | account_id | u64 |
-| 8–62 | padding | [u8; 55] |
+| 8–35 | padding | [u8; 28] |
+| 36–39 | checksum | u32 |
+| 40–62 | padding | [u8; 23] |
 | 63 | message_kind = 0 | u8 |
 
 ### Server → Client
@@ -47,7 +51,8 @@ All messages are 64 bytes. Client-to-server messages are distinguished by the fi
 | 0–15 | debit_balance | u128 |
 | 16–31 | credit_balance | u128 |
 | 32–39 | account_id | u64 |
-| 40–62 | padding | [u8; 23] |
+| 40–43 | checksum | u32 |
+| 44–62 | padding | [u8; 19] |
 | 63 | status | u8 |
 
 The response reflects the committed balances at the previous flush boundary — the pending transaction has been accepted into the batch but balances are updated when the batch is written to disk, not at enqueue time.
@@ -72,9 +77,11 @@ The client registers each account, sends a series of random debits and credits, 
 
 ## What it is not
 
-Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, checksums, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
+Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
 
 ## Next Steps
 
 - **Single WAL file** — currently performing N fsyncs per event loop iteration, one per dirty account. Consolidating all transactions into a single append-only `wal.log` reduces that to one fsync per batch regardless of how many accounts were touched. Will require reworking the startup replay logic and removing the per-account file handle from `AccountEntry`.
+
+- **Transaction IDs for idempotency** — add a `txid: u64` field to `Transaction`, repurposed from padding. Clients assign an ID to each transaction; the server echoes it back in `AccountResponse`. Duplicate submissions with the same ID can be detected and rejected, making retries safe.
 
