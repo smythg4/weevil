@@ -1,6 +1,6 @@
 use bytemuck::{Pod, Zeroable};
-use std::fs::{File, OpenOptions};
-use std::io::{Read, Write};
+use std::fs::File;
+use std::io::Write;
 
 use crate::WeevilError;
 use crate::transaction::{Transaction, TransactionKind};
@@ -53,12 +53,10 @@ impl std::fmt::Display for Account {
 const MAX_BATCH: usize = 100;
 pub struct AccountEntry {
     pub account_id: u64,
-    file_backing: File,
     pub debit_balance: u128,
     pub credit_balance: u128,
     pending_transactions: [Transaction; MAX_BATCH],
     len: usize,
-    dirty: bool,
 }
 
 impl std::fmt::Display for AccountEntry {
@@ -82,41 +80,17 @@ impl std::fmt::Display for AccountEntry {
 }
 
 impl AccountEntry {
-    pub fn new(account_id: u64) -> Result<Self, WeevilError> {
-        let path = format!("./data_files/{account_id}.log");
-        let mut f = OpenOptions::new()
-            .read(true)
-            .append(true)
-            .create(true)
-            .open(&path)?;
-        let mut credit_balance = 0;
-        let mut debit_balance = 0;
-        let mut buf = [0u8; 64];
-        loop {
-            match f.read_exact(&mut buf) {
-                Ok(_) => {
-                    if buf[63] != MessageKind::Transaction as u8 {
-                        return Err(WeevilError::InvalidMessageKind(buf[63]));
-                    }
-                    let tx = bytemuck::pod_read_unaligned::<Transaction>(&buf);
-                    tx.verify()?;
-                    match tx.kind()? {
-                        TransactionKind::Debit => debit_balance += tx.amount,
-                        TransactionKind::Credit => credit_balance += tx.amount,
-                    };
-                }
-                Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => break,
-                Err(e) => return Err(e.into()),
-            };
-        }
+    pub fn new(
+        account_id: u64,
+        debit_balance: u128,
+        credit_balance: u128,
+    ) -> Result<Self, WeevilError> {
         Ok(AccountEntry {
             account_id,
-            file_backing: f,
             debit_balance,
             credit_balance,
             pending_transactions: [Transaction::default(); MAX_BATCH],
             len: 0,
-            dirty: false,
         })
     }
 
@@ -124,14 +98,21 @@ impl AccountEntry {
         if self.len >= MAX_BATCH {
             return Err(WeevilError::PendingTransactionsFull);
         }
-        self.dirty = true;
         self.pending_transactions[self.len] = tx;
         self.len += 1;
         Ok(())
     }
 
-    pub fn write(&mut self) -> Result<(), WeevilError> {
-        self.file_backing.write_all(bytemuck::cast_slice(
+    pub fn apply_transaction(&mut self, tx: Transaction) -> Result<(), WeevilError> {
+        match tx.kind()? {
+            TransactionKind::Debit => self.debit_balance += tx.amount,
+            TransactionKind::Credit => self.credit_balance += tx.amount,
+        }
+        Ok(())
+    }
+
+    pub fn write(&mut self, f: &mut File) -> Result<(), WeevilError> {
+        f.write_all(bytemuck::cast_slice(
             &self.pending_transactions[0..self.len],
         ))?;
         for tx in &self.pending_transactions[0..self.len] {
@@ -144,17 +125,8 @@ impl AccountEntry {
         Ok(())
     }
 
-    pub fn sync(&mut self) -> Result<(), WeevilError> {
-        if self.dirty {
-            self.file_backing.sync_data()?;
-            self.dirty = false;
-        }
-        Ok(())
-    }
-
-    pub fn flush(&mut self) -> Result<(), WeevilError> {
-        self.write()?;
-        self.sync()
+    pub fn is_dirty(&self) -> bool {
+        self.len > 0
     }
 
     pub fn response(&self) -> AccountResponse {
@@ -243,6 +215,46 @@ impl std::fmt::Display for AccountResponse {
                 (self.credit_balance - self.debit_balance) as f64 / 1000.0,
             )
         }
+    }
+}
+
+const _: () = assert!(std::mem::size_of::<CheckpointRecord>() == 64);
+#[repr(C)]
+#[derive(Debug, Copy, Clone, Pod, Zeroable)]
+pub struct CheckpointRecord {
+    pub debit_balance: u128,
+    pub credit_balance: u128,
+    pub account_id: u64,
+    pub checksum: u32,
+    _pad: [u8; 20],
+}
+
+impl CheckpointRecord {
+    pub fn verify(&self) -> Result<(), WeevilError> {
+        // TODO: Find a way to avoid this copy
+        let mut copy = *self;
+        let old_checksum = copy.checksum;
+        copy.checksum = 0;
+        let checksum = crc32(bytemuck::bytes_of(&copy));
+        if checksum == old_checksum {
+            return Ok(());
+        }
+        Err(WeevilError::ChecksumFailed)
+    }
+}
+
+impl From<&AccountEntry> for CheckpointRecord {
+    fn from(acct_entry: &AccountEntry) -> Self {
+        let mut cr = CheckpointRecord {
+            debit_balance: acct_entry.debit_balance,
+            credit_balance: acct_entry.credit_balance,
+            account_id: acct_entry.account_id,
+            checksum: 0,
+            _pad: [0u8; 20],
+        };
+        let checksum = crc32(bytemuck::bytes_of(&cr));
+        cr.checksum = checksum;
+        cr
     }
 }
 

@@ -4,17 +4,17 @@ A tiny toy implementation of core [TigerBeetle](https://tigerbeetle.com) concept
 
 ## What it is
 
-Weevil is a single-threaded TCP server that accepts financial transactions from concurrent clients, appends them to per-account binary log files, and responds with account balance information. It is not a real financial system.
+Weevil is a single-threaded TCP server that accepts financial transactions from concurrent clients, appends them to a single append-only WAL file, and responds with account balance information. It is not a real financial system.
 
 ## Concepts explored
 
 - **Zero-copy wire protocol** — all messages are fixed 64-byte `#[repr(C)]` structs cast directly from network buffers using `bytemuck`. No serialization layer. Responses are the same: a fixed 64-byte `AccountResponse` struct cast directly to the wire.
 - **Non-blocking I/O** — a single-threaded `mio` event loop handles multiple concurrent connections without threads.
-- **Append-only durable storage** — transactions are written as raw bytes to per-account `.log` files and flushed with `fdatasync` at the end of each event loop batch.
-- **Batch commit with response ordering** — transactions accumulate across one poll iteration. At the end of each iteration, dirty account logs are written and flushed with `fdatasync`. Only after the flush completes are sessions promoted from `AwaitingCommit` to `Writing`, guaranteeing no client receives a response before its transaction is durable on disk.
+- **Append-only WAL** — all transactions are written as raw bytes to a single `wal.log` file. One `fdatasync` per event loop batch regardless of how many accounts were touched. Periodically checkpointed: account balances are snapshotted to a `checkpoint` file via atomic temp-file rename, then the WAL is truncated. On startup, the checkpoint is loaded first and the WAL tail is replayed on top.
+- **Batch commit with response ordering** — transactions accumulate across one poll iteration. At the end of each iteration, all pending transactions are written to the WAL and flushed with a single `fdatasync`. Only after the flush completes are sessions promoted from `AwaitingCommit` to `Writing`, guaranteeing no client receives a response before its transaction is durable on disk.
 - **Separate debit and credit accumulators** — `AccountEntry` tracks `debit_balance: u128` and `credit_balance: u128` as independent unsigned accumulators rather than a single signed balance. Unsigned types cannot go negative, transaction volume is preserved in both directions, and the net balance is derived by comparison and safe subtraction at display time. Matches the TigerBeetle model. ([64-Bit Bank Balances 'Ought to be Enough for Anybody'?](https://tigerbeetle.com/blog/2023-09-19-64-bit-bank-balances-ought-to-be-enough-for-anybody))
 - **Batched disk writes** — all pending transactions for an account are written in a single `write_all(bytemuck::cast_slice(...))` call rather than one syscall per transaction. `bytemuck::cast_slice` reinterprets the contiguous `[Transaction; N]` array as a flat `&[u8]` with no copying.
-- **Balance replay** — on startup, each account's balance is reconstructed by replaying its log file 64 bytes at a time.
+- **Balance replay** — on startup, account balances are restored from the checkpoint file (if present), then the WAL is replayed 64 bytes at a time to recover any transactions that postdate the last checkpoint.
 - **Static connection table** — connections are stored in a fixed `[Option<Session>; MAX_CONNECTIONS]` array. The mio `Token` is a direct array index. No `HashMap`, no hashing, no pointer chasing — O(1) lookup by design.
 - **Static account cache with open addressing** — accounts are stored in a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array. Slot selection uses modulo hashing with linear probing and full wrap-around — no `HashMap`, no heap allocation. `MAX_ACCOUNTS` is prime (257) to reduce probe clustering.
 - **Static pending transaction buffer** — each `AccountEntry` holds a `[Transaction; MAX_BATCH]` array with a `len` counter. No `Vec`, no heap growth. When the batch is full, `add_transaction` returns an error rather than flushing inline, preserving the batch commit guarantee.
@@ -72,15 +72,15 @@ cargo run --bin server
 cargo run --bin client
 ```
 
-The client registers each account, sends a series of random debits and credits, then queries the final balance. Log files are written to `./data_files/` and persist across restarts.
+The client registers each account, sends a series of random debits and credits, then queries the final balance. `./data_files/wal.log` and `./data_files/checkpoint` persist across restarts.
 
 ## What it is not
 
-Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, a WAL, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
+Weevil omits most of what makes TigerBeetle production-worthy: `O_DIRECT`, cluster replication, and anything resembling fault tolerance. It is a learning artifact.
+
+Transaction history is not preserved — the WAL is truncated after each checkpoint. Only current account balances survive a restart. There is no audit log, no way to replay individual transactions, and no mechanism to answer "what happened to this account."
 
 ## Next Steps
-
-- **Single WAL file** — currently performing N fsyncs per event loop iteration, one per dirty account. Consolidating all transactions into a single append-only `wal.log` reduces that to one fsync per batch regardless of how many accounts were touched. Will require reworking the startup replay logic and removing the per-account file handle from `AccountEntry`.
 
 - **Transaction IDs for idempotency** — add a `txid: u64` field to `Transaction`, repurposed from padding. Clients assign an ID to each transaction; the server echoes it back in `AccountResponse`. Duplicate submissions with the same ID can be detected and rejected, making retries safe.
 

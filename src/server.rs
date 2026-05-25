@@ -1,11 +1,14 @@
 use mio::event::Event;
 use mio::net::{TcpListener, TcpStream};
 use mio::{Events, Interest, Poll, Registry, Token};
-use std::io::{Read, Write};
+use std::fs::{File, OpenOptions};
+use std::io::{Read, Seek, SeekFrom, Write};
 
 use weevil::WeevilError;
-use weevil::account::{Account, AccountEntry, AccountResponse, CACHE_FULL, NOT_FOUND};
-use weevil::transaction::Transaction;
+use weevil::account::{
+    Account, AccountEntry, AccountResponse, CACHE_FULL, CheckpointRecord, NOT_FOUND,
+};
+use weevil::transaction::{Transaction, TransactionKind};
 
 const SERVER: Token = Token(0);
 
@@ -184,9 +187,7 @@ fn main() -> Result<(), WeevilError> {
         }
 
         // now that we've collected all our inputs, we push them to disk
-        for entry in account_entries.iter_mut().flatten() {
-            entry.flush()?; // has internal check before the syscall
-        }
+        account_entries.flush()?;
 
         // find all the AwaitingCommit sessions
         // now we notify the client that their transaction is durable on disk
@@ -249,7 +250,7 @@ fn process_account(
         println!("account cache full");
         session.stage_response(cast_response(CACHE_FULL));
     } else {
-        let entry = AccountEntry::new(acct.account_id)?;
+        let entry = AccountEntry::new(acct.account_id, 0, 0)?;
         println!("Registering account: {entry}...");
         // guaranteed to succeed — slot was confirmed above
         let entry = account_entries
@@ -301,14 +302,24 @@ fn cast_response(r: AccountResponse) -> [u8; 64] {
 }
 struct AccountEntryCache {
     entries: [Option<AccountEntry>; MAX_ACCOUNTS],
+    file_backing: File,
 }
 
 impl AccountEntryCache {
     pub fn new() -> Self {
+        let f = OpenOptions::new()
+            .append(true)
+            .create(true)
+            .read(true)
+            .open("./data_files/wal.log")
+            .expect("error loading wal file");
         const EMPTY_ACCOUNT_ENTRY: Option<AccountEntry> = None;
-        AccountEntryCache {
+        let mut cache = AccountEntryCache {
             entries: [EMPTY_ACCOUNT_ENTRY; MAX_ACCOUNTS],
-        }
+            file_backing: f,
+        };
+        cache.replay().expect("transaction replay failed");
+        cache
     }
 
     fn find_free_slot(&self, acct_id: u64) -> Option<usize> {
@@ -347,11 +358,84 @@ impl AccountEntryCache {
         self.get(id)
     }
 
-    pub fn iter_mut(&mut self) -> std::slice::IterMut<'_, Option<AccountEntry>> {
-        self.entries.iter_mut()
-    }
-
     pub fn has_capacity(&self, acct_id: u64) -> bool {
         self.find_free_slot(acct_id).is_some()
+    }
+
+    fn checkpoint(&mut self) -> Result<(), WeevilError> {
+        let mut temp_file = OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open("./data_files/checkpoint.tmp")?;
+        let crs = self.entries.iter().flatten().map(CheckpointRecord::from);
+        for cr in crs {
+            temp_file.write_all(bytemuck::bytes_of(&cr))?;
+        }
+        temp_file.sync_data()?;
+        std::fs::rename("./data_files/checkpoint.tmp", "./data_files/checkpoint")?;
+        self.file_backing.set_len(0)?;
+        self.file_backing.seek(SeekFrom::Start(0))?;
+        Ok(())
+    }
+
+    fn replay(&mut self) -> Result<(), WeevilError> {
+        let mut buf = [0u8; 64];
+
+        // check the checkpoint file if it exists
+        match OpenOptions::new()
+            .read(true)
+            .open("./data_files/checkpoint")
+        {
+            Ok(mut checkpoint_file) => {
+                // TODO: I'm probably swallowing errors silently
+                while checkpoint_file.read_exact(&mut buf).is_ok() {
+                    let cr: CheckpointRecord = bytemuck::pod_read_unaligned(&buf);
+                    cr.verify()?;
+                    let acct_entry =
+                        AccountEntry::new(cr.account_id, cr.debit_balance, cr.credit_balance)?;
+                    self.insert(acct_entry).expect("ran out of space");
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.into()),
+        }
+
+        // replay the wal for transactions that didn't make it yet
+        self.file_backing.seek(SeekFrom::Start(0))?;
+
+        // TODO: I'm probably swallowing errors silently
+        while self.file_backing.read_exact(&mut buf).is_ok() {
+            let tx: Transaction = bytemuck::pod_read_unaligned(&buf);
+            tx.verify()?;
+            if let Some(entry) = self.get_mut(tx.account_id) {
+                entry.apply_transaction(tx)?;
+            } else {
+                let (db, cb) = match tx.kind()? {
+                    TransactionKind::Debit => (tx.amount, 0),
+                    TransactionKind::Credit => (0, tx.amount),
+                };
+                let acct_entry = AccountEntry::new(tx.account_id, db, cb)?;
+                self.insert(acct_entry).expect("ran out of space");
+            }
+        }
+        Ok(())
+    }
+
+    fn flush(&mut self) -> Result<(), WeevilError> {
+        let mut needs_sync = false;
+        self.entries.iter_mut().flatten().try_for_each(|ae| {
+            if ae.is_dirty() {
+                needs_sync = true;
+            }
+            ae.write(&mut self.file_backing)
+        })?;
+        if needs_sync {
+            self.file_backing.sync_data()?;
+        }
+        if self.file_backing.metadata()?.len() > 1_000_000 {
+            self.checkpoint()?;
+        }
+        Ok(())
     }
 }
