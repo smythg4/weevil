@@ -11,9 +11,9 @@ const _: () = assert!(std::mem::size_of::<Account>() == 64);
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Account {
     pub account_id: u64,
-    _pad: [u8; 28],
     pub checksum: u32,
-    _pad2: [u8; 23],
+    _pad: [u8; 31],
+    _pad2: [u8; 20],
     message_kind: u8,
 }
 
@@ -21,9 +21,9 @@ impl Account {
     pub fn new(account_id: u64) -> Self {
         let mut a = Account {
             account_id,
-            _pad: [0u8; 28],
             checksum: 0,
-            _pad2: [0u8; 23],
+            _pad: [0u8; 31],
+            _pad2: [0u8; 20],
             message_kind: MessageKind::Account as u8,
         };
         let checksum = crc32(bytemuck::bytes_of(&a));

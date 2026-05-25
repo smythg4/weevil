@@ -39,9 +39,8 @@ All messages are 64 bytes. Client-to-server messages are distinguished by the fi
 | 63 | message_kind = 1 | u8 |
 | **Account** (`message_kind = 0`) | | |
 | 0–7 | account_id | u64 |
-| 8–35 | padding | [u8; 28] |
-| 36–39 | checksum | u32 |
-| 40–62 | padding | [u8; 23] |
+| 8–11 | checksum | u32 |
+| 12–62 | padding | [u8; 51] |
 | 63 | message_kind = 0 | u8 |
 
 ### Server → Client
