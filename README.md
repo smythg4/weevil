@@ -19,7 +19,7 @@ Weevil is a single-threaded TCP server that accepts financial transactions from 
 - **Static account cache with open addressing** — accounts are stored in a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array. Slot selection uses modulo hashing with linear probing and full wrap-around — no `HashMap`, no heap allocation. `MAX_ACCOUNTS` is prime (257) to reduce probe clustering.
 - **Static pending transaction buffer** — each `AccountEntry` holds a `[Transaction; MAX_BATCH]` array with a `len` counter. No `Vec`, no heap growth. When the batch is full, `add_transaction` returns an error rather than flushing inline, preserving the batch commit guarantee.
 - **Type-state response buffer** — `SessionStatus::AwaitingCommit([u8; 64])` and `Writing([u8; 64])` carry the response payload inside the state. The type system enforces that a session cannot be in `Writing` state without a response ready to send. No separate `write_buf` field, no `Option` to unwrap.
-- **CRC32 checksums** — every wire message and every log record carries a CRC32 checksum in repurposed padding bytes. Computed in `new()` with the checksum field zeroed, verified on network ingress and during startup log replay. Implemented using the Hacker's Delight bitwise approach — reflected polynomial `0xEDB88320`, table-free, no dependencies.
+- **CRC32 checksums** — every wire message and every log record carries a CRC32 checksum in repurposed padding bytes. Computed in `new()` with the checksum field zeroed, verified on network ingress and during startup log replay. Table-free, no dependencies
 
 ## Protocol
 

@@ -32,6 +32,7 @@ impl Account {
     }
 
     pub fn verify(&self) -> Result<(), WeevilError> {
+        // TODO: Find a way to avoid this copy
         let mut copy = *self;
         let old_checksum = copy.checksum;
         copy.checksum = 0;
@@ -186,6 +187,7 @@ pub struct AccountResponse {
 
 impl AccountResponse {
     pub fn verify(&self) -> Result<(), WeevilError> {
+        // TODO: Find a way to avoid this copy
         let mut copy = *self;
         let old_checksum = copy.checksum;
         copy.checksum = 0;
