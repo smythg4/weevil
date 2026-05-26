@@ -78,6 +78,14 @@ impl AccountEntryCache {
         self.find_free_slot(acct_id).is_some()
     }
 
+    pub fn len(&self) -> usize {
+        self.pt_len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.pt_len == 0
+    }
+
     pub fn add_transaction(&mut self, tx: Transfer) -> Result<(), WeevilError> {
         if self.pt_len >= MAX_BATCH {
             return Err(WeevilError::PendingTransactionsFull);
@@ -169,7 +177,7 @@ impl AccountEntryCache {
         if self.pt_len == 0 {
             return Ok(());
         }
-        println!("Flushing {} transfers...", self.pt_len);
+
         self.file_backing.write_all(bytemuck::cast_slice(
             &self.pending_transactions[0..self.pt_len],
         ))?;

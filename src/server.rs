@@ -121,6 +121,9 @@ impl Session {
 }
 
 fn main() -> Result<(), WeevilError> {
+    let mut flush_count = 0;
+    let mut flush_total = 0;
+
     let mut poll = Poll::new()?;
     let mut events = Events::with_capacity(128);
 
@@ -182,6 +185,10 @@ fn main() -> Result<(), WeevilError> {
         }
 
         // now that we've collected all our inputs, we push them to disk
+        if !account_entries.is_empty() {
+            flush_count += 1;
+            flush_total += account_entries.len();
+        }
         account_entries.flush()?;
 
         // find all the AwaitingCommit sessions
@@ -199,6 +206,12 @@ fn main() -> Result<(), WeevilError> {
             }
             poll.registry()
                 .reregister(&mut s.stream, s.token, Interest::WRITABLE)?;
+        }
+
+        if flush_total > 200 {
+            println!("Average flush batch size: {}", flush_total / flush_count);
+            flush_total = 0;
+            flush_count = 0;
         }
     }
 }
@@ -238,20 +251,20 @@ fn process_account(
     account_entries: &mut AccountEntryCache,
 ) -> Result<(), WeevilError> {
     if let Some(a) = account_entries.get(acct.account_id) {
-        println!("{a}");
+        //println!("{a}");
         // our write_buf is staged, now we wait until fsync is complete before sending
         session.stage_response(cast_response(a.response()));
     } else if !account_entries.has_capacity(acct.account_id) {
-        println!("account cache full");
+        eprintln!("account cache full");
         session.stage_response(cast_response(CACHE_FULL));
     } else {
         let entry = AccountEntry::new(acct.account_id, 0, 0);
-        println!("Registering account: {entry}...");
+        //println!("Registering account: {entry}...");
         // guaranteed to succeed — slot was confirmed above
         let entry = account_entries
             .insert(entry)
             .expect("slot vanished after has_capacity");
-        println!("Success: {entry}");
+        //println!("Success: {entry}");
         session.stage_response(cast_response(entry.response()));
     }
     Ok(())
@@ -262,32 +275,28 @@ fn process_transfer(
     session: &mut Session,
     account_entries: &mut AccountEntryCache,
 ) -> Result<(), WeevilError> {
-    let mut debit_exists = false;
-    let mut credit_exists = false;
-    // handle debits
-    if let Some(a) = account_entries.get(tx.debit_account_id) {
-        println!("Debiting [{}] ${:.2}...", a, tx.amount as f64 / 1000.0);
-        debit_exists = true;
-        // our write_buf is staged, now we wait until fsync is complete before sending
-        session.stage_response(cast_response(a.response()));
-    } else {
-        eprintln!("Account to debit [{}] not found...", tx.debit_account_id);
-        session.stage_response(cast_response(NOT_FOUND));
+    // TODO: Update this once you add a `TransactionResponse`` type - right now it always returns
+    // credit account information back to client
+    let debit_response = account_entries
+        .get(tx.debit_account_id)
+        .map(|a| a.response());
+    let credit_response = account_entries
+        .get(tx.credit_account_id)
+        .map(|a| a.response());
+
+    match (debit_response, credit_response) {
+        (Some(_), Some(cr)) => {
+            account_entries.add_transaction(tx)?;
+            session.stage_response(cast_response(cr));
+        }
+        _ => {
+            eprintln!(
+                "Account not found for transfer: debit={} credit={}",
+                tx.debit_account_id, tx.credit_account_id
+            );
+            session.stage_response(cast_response(NOT_FOUND));
+        }
     }
-    // handle credits
-    if let Some(a) = account_entries.get(tx.credit_account_id) {
-        println!("Crediting [{}] ${:.2}...", a, tx.amount as f64 / 1000.0);
-        credit_exists = true;
-        // our write_buf is staged, now we wait until fsync is complete before sending
-        session.stage_response(cast_response(a.response()));
-    } else {
-        eprintln!("Account to credit [{}] not found...", tx.credit_account_id);
-        session.stage_response(cast_response(NOT_FOUND));
-    }
-    if debit_exists && credit_exists {
-        account_entries.add_transaction(tx)?;
-    }
-    // TODO: Add error case for account not found
     Ok(())
 }
 
