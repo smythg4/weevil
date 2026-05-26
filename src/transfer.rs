@@ -2,12 +2,15 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::{MessageKind, WeevilError, crc32};
 
+// DEAD CODE
+#[derive(Debug, Copy, Clone)]
 #[repr(u8)]
 pub enum TransactionKind {
     Debit,
     Credit,
 }
 
+// DEAD CODE
 impl std::fmt::Display for TransactionKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
@@ -17,45 +20,35 @@ impl std::fmt::Display for TransactionKind {
     }
 }
 
-const _: () = assert!(std::mem::size_of::<Transaction>() == 64);
+const _: () = assert!(std::mem::size_of::<Transfer>() == 64);
 
 // TODO: Add a txid field for idempotency purposes
 // Ex: Client sents tx with id, responses are acknowldged
 // with the same id
 #[repr(C)]
 #[derive(Debug, Default, Copy, Clone, Pod, Zeroable)]
-pub struct Transaction {
+pub struct Transfer {
     pub amount: u128,
-    pub account_id: u64,
-    transaction_kind: u8,
-    _pad: [u8; 3],
+    pub debit_account_id: u64,
+    pub credit_account_id: u64,
     pub checksum: u32,
-    _pad2: [u8; 31],
+    _pad: [u8; 27],
     message_kind: u8,
 }
 
-impl Transaction {
-    pub fn new(amount: u128, account_id: u64, transaction_kind: TransactionKind) -> Self {
-        let mut tx = Transaction {
+impl Transfer {
+    pub fn new(amount: u128, debit_account_id: u64, credit_account_id: u64) -> Self {
+        let mut tx = Transfer {
             amount,
-            account_id,
-            transaction_kind: transaction_kind as u8,
-            message_kind: MessageKind::Transaction as u8,
-            _pad: [0u8; 3],
+            debit_account_id,
+            credit_account_id,
             checksum: 0,
-            _pad2: [0u8; 31],
+            _pad: [0u8; 27],
+            message_kind: MessageKind::Transaction as u8,
         };
         let checksum = crc32(bytemuck::bytes_of(&tx));
         tx.checksum = checksum;
         tx
-    }
-
-    pub fn kind(&self) -> Result<TransactionKind, WeevilError> {
-        match self.transaction_kind {
-            0 => Ok(TransactionKind::Debit),
-            1 => Ok(TransactionKind::Credit),
-            _ => Err(WeevilError::InvalidMessageKind(self.transaction_kind)),
-        }
     }
 
     pub fn verify(&self) -> Result<(), WeevilError> {
@@ -71,16 +64,14 @@ impl Transaction {
     }
 }
 
-impl std::fmt::Display for Transaction {
+impl std::fmt::Display for Transfer {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         let value = self.amount as f64 / 1000.0;
-        write!(f, "[{}] ", self.account_id)?;
-        if let Ok(k) = self.kind() {
-            write!(f, "{k} ")?;
-        } else {
-            write!(f, "UNKNOWN ")?;
-        };
-        write!(f, "${:.2}", value)
+        write!(
+            f,
+            "[{}] Debit: ${:.2}, [{}] Credit: ${:.2}",
+            self.debit_account_id, value, self.credit_account_id, value
+        )
     }
 }
 
@@ -89,21 +80,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_transaction_cast() {
+    fn test_transfer_cast() {
         let mut bytes = [0u8; 64];
         // amount: 1000 as u128, little-endian at offset 0
         bytes[0..16].copy_from_slice(&1000u128.to_le_bytes());
-        // account_id: 42 as u64, little-endian at offset 16
+        // debit_account_id: 42 as u64, little-endian at offset 16
         bytes[16..24].copy_from_slice(&42u64.to_le_bytes());
-        // kind: 1 (Credit) at offset 24
-        bytes[24] = 1;
+        // credit_account_id: 9 as u64, little-endian at offset 16
+        bytes[24..32].copy_from_slice(&9u64.to_le_bytes());
         // message_kind = 1 (Transaction)
         bytes[63] = 1;
 
-        let tx: Transaction = bytemuck::pod_read_unaligned(&bytes);
+        let tx: Transfer = bytemuck::pod_read_unaligned(&bytes);
         assert_eq!(tx.amount, 1000);
-        assert_eq!(tx.account_id, 42);
-        assert_eq!(tx.transaction_kind, 1);
+        assert_eq!(tx.debit_account_id, 42);
+        assert_eq!(tx.credit_account_id, 9);
         assert_eq!(tx.message_kind, MessageKind::Transaction as u8);
     }
 }

@@ -1,9 +1,7 @@
 use bytemuck::{Pod, Zeroable};
-use std::fs::File;
-use std::io::Write;
 
 use crate::WeevilError;
-use crate::transaction::{Transaction, TransactionKind};
+use crate::transfer::Transfer;
 use crate::{MessageKind, crc32};
 
 const _: () = assert!(std::mem::size_of::<Account>() == 64);
@@ -50,13 +48,10 @@ impl std::fmt::Display for Account {
     }
 }
 
-const MAX_BATCH: usize = 100;
 pub struct AccountEntry {
     pub account_id: u64,
     pub debit_balance: u128,
     pub credit_balance: u128,
-    pending_transactions: [Transaction; MAX_BATCH],
-    len: usize,
 }
 
 impl std::fmt::Display for AccountEntry {
@@ -89,44 +84,17 @@ impl AccountEntry {
             account_id,
             debit_balance,
             credit_balance,
-            pending_transactions: [Transaction::default(); MAX_BATCH],
-            len: 0,
         })
     }
 
-    pub fn add_transaction(&mut self, tx: Transaction) -> Result<(), WeevilError> {
-        if self.len >= MAX_BATCH {
-            return Err(WeevilError::PendingTransactionsFull);
+    pub fn apply_transaction(&mut self, tx: &Transfer) -> Result<(), WeevilError> {
+        if self.account_id == tx.debit_account_id {
+            self.debit_balance += tx.amount;
+        } else if self.account_id == tx.credit_account_id {
+            self.credit_balance += tx.amount;
         }
-        self.pending_transactions[self.len] = tx;
-        self.len += 1;
+        // TODO: add an error case if neither tx account id applies to this account
         Ok(())
-    }
-
-    pub fn apply_transaction(&mut self, tx: Transaction) -> Result<(), WeevilError> {
-        match tx.kind()? {
-            TransactionKind::Debit => self.debit_balance += tx.amount,
-            TransactionKind::Credit => self.credit_balance += tx.amount,
-        }
-        Ok(())
-    }
-
-    pub fn write(&mut self, f: &mut File) -> Result<(), WeevilError> {
-        f.write_all(bytemuck::cast_slice(
-            &self.pending_transactions[0..self.len],
-        ))?;
-        for tx in &self.pending_transactions[0..self.len] {
-            match tx.kind()? {
-                TransactionKind::Debit => self.debit_balance += tx.amount,
-                TransactionKind::Credit => self.credit_balance += tx.amount,
-            };
-        }
-        self.len = 0;
-        Ok(())
-    }
-
-    pub fn is_dirty(&self) -> bool {
-        self.len > 0
     }
 
     pub fn response(&self) -> AccountResponse {

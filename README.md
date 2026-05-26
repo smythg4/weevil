@@ -4,7 +4,7 @@ A tiny toy implementation of core [TigerBeetle](https://tigerbeetle.com) concept
 
 ## What it is
 
-Weevil is a single-threaded TCP server that accepts financial transactions from concurrent clients, appends them to a single append-only WAL file, and responds with account balance information. It is not a real financial system.
+Weevil is a single-threaded TCP server that accepts financial transfers from concurrent clients, appends them to a single append-only WAL file, and responds with account balance information. Each transfer atomically debits one account and credits another — both sides land in the WAL as a single 64-byte record. It is not a real financial system.
 
 ## Concepts explored
 
@@ -17,7 +17,8 @@ Weevil is a single-threaded TCP server that accepts financial transactions from 
 - **Balance replay** — on startup, account balances are restored from the checkpoint file (if present), then the WAL is replayed 64 bytes at a time to recover any transactions that postdate the last checkpoint.
 - **Static connection table** — connections are stored in a fixed `[Option<Session>; MAX_CONNECTIONS]` array. The mio `Token` is a direct array index. No `HashMap`, no hashing, no pointer chasing — O(1) lookup by design.
 - **Static account cache with open addressing** — accounts are stored in a fixed `[Option<AccountEntry>; MAX_ACCOUNTS]` array. Slot selection uses modulo hashing with linear probing and full wrap-around — no `HashMap`, no heap allocation. `MAX_ACCOUNTS` is prime (257) to reduce probe clustering.
-- **Static pending transaction buffer** — each `AccountEntry` holds a `[Transaction; MAX_BATCH]` array with a `len` counter. No `Vec`, no heap growth. When the batch is full, `add_transaction` returns an error rather than flushing inline, preserving the batch commit guarantee.
+- **Atomic double-entry transfers** — each `Transfer` carries both a `debit_account_id` and `credit_account_id`. Both sides of the transfer are written to the WAL as a single 64-byte record and applied together on flush. There is no moment where one account has been debited but the other has not been credited — the WAL record is either fully replayed or not at all.
+- **Cache-level pending transfer buffer** — `AccountEntryCache` holds a single `[Transfer; MAX_BATCH]` array shared across all accounts. All in-flight transfers accumulate in one buffer regardless of which accounts they touch. One buffer, one `write_all`, one `fdatasync` per event loop batch.
 - **Type-state response buffer** — `SessionStatus::AwaitingCommit([u8; 64])` and `Writing([u8; 64])` carry the response payload inside the state. The type system enforces that a session cannot be in `Writing` state without a response ready to send. No separate `write_buf` field, no `Option` to unwrap.
 - **CRC32 checksums** — every wire message and every log record carries a CRC32 checksum in repurposed padding bytes. Computed in `new()` with the checksum field zeroed, verified on network ingress and during startup log replay. Table-free, no dependencies
 
@@ -29,13 +30,12 @@ All messages are 64 bytes. Client-to-server messages are distinguished by the fi
 
 | Byte offset | Field | Type |
 |---|---|---|
-| **Transaction** (`message_kind = 1`) | | |
+| **Transfer** (`message_kind = 1`) | | |
 | 0–15 | amount | u128 |
-| 16–23 | account_id | u64 |
-| 24 | transaction_kind (0=debit, 1=credit) | u8 |
-| 25–27 | padding | [u8; 3] |
-| 28–31 | checksum | u32 |
-| 32–62 | padding | [u8; 31] |
+| 16–23 | debit_account_id | u64 |
+| 24–31 | credit_account_id | u64 |
+| 32–35 | checksum | u32 |
+| 36–62 | padding | [u8; 27] |
 | 63 | message_kind = 1 | u8 |
 | **Account** (`message_kind = 0`) | | |
 | 0–7 | account_id | u64 |
@@ -54,7 +54,7 @@ All messages are 64 bytes. Client-to-server messages are distinguished by the fi
 | 44–62 | padding | [u8; 19] |
 | 63 | status | u8 |
 
-The response reflects the committed balances at the previous flush boundary — the pending transaction has been accepted into the batch but balances are updated when the batch is written to disk, not at enqueue time.
+The response reflects the committed balances at the previous flush boundary — the pending transfer has been accepted into the batch but balances are updated when the batch is written to disk, not at enqueue time. For transfers the response reflects the credit account's balance.
 
 | `status` | Meaning |
 |---|---|
@@ -72,7 +72,22 @@ cargo run --bin server
 cargo run --bin client
 ```
 
-The client registers each account, sends a series of random debits and credits, then queries the final balance. `./data_files/wal.log` and `./data_files/checkpoint` persist across restarts.
+The client registers each account, sends a series of random transfers, then queries the final balance. `./data_files/wal.log` and `./data_files/checkpoint` persist across restarts.
+
+## Performance
+
+Measured on a MacBook Pro (Apple Silicon) with `NUM_THREADS` varied and total transfers fixed at 10,000. All transfers are fully durable — each batch is flushed with `fdatasync` before any client receives a response.
+
+| Threads | Transfers/thread | Total transfers | TPS (avg 3 runs) |
+|---|---|---|---|
+| 10 | 1,000 | 10,000 | ~1,252 |
+| 20 | 500 | 10,000 | ~2,531 |
+| 40 | 250 | 10,000 | ~4,976 |
+| 100 | 100 | 10,000 | ~10,787 |
+| 200 | 50 | 10,000 | ~11,793 |
+| 250 | 40 | 10,000 | ~12,227 |
+
+TPS scales with concurrency because `fdatasync` cost is amortized across all transfers that arrive during a single event loop iteration. At low concurrency (10 threads), batches average 2–8 transfers per sync. Throughput plateaus around 12,000 TPS at ~200 threads — beyond that, batches are saturated and adding more concurrent clients yields diminishing returns. All numbers represent 100% successful durable commits with response verification.
 
 ## What it is not
 
@@ -84,6 +99,5 @@ Transaction history is not preserved — the WAL is truncated after each checkpo
 
 - **Transaction IDs for idempotency** — add a `txid: u64` field to `Transaction`, repurposed from padding. Clients assign an ID to each transaction; the server echoes it back in `AccountResponse`. Duplicate submissions with the same ID can be detected and rejected, making retries safe.
 
-- **Transfer Types** - Change `Transaction` to `Transfer` that contains `credit_account_id`: `u64` and `debit_account_id`: `u64`. Current 64-byte structure has room for it. Processing `Transfer` involves updating both `Account`s. Will require a rewrite of the replay logic for `AccountEntryCache`. Replay logic can also enforce total
-debits = total credits.
+- **Testing** — coverage is thin. Missing: checksum rejection on corrupt data; WAL-only replay (no checkpoint); checkpoint + WAL tail replay; partial `checkpoint.tmp` doesn't corrupt state on restart; `MAX_BATCH` boundary (100th transaction succeeds, 101st returns `PendingTransactionsFull`); account cache full response; duplicate account registration returns existing balance; `NOT_FOUND` on unregistered account; open-addressing correctness under hash collisions.
 

@@ -5,10 +5,11 @@ use std::process::{Child, Command, Stdio};
 use std::thread;
 use std::time::Duration;
 use weevil::account::{Account, AccountResponse};
-use weevil::transaction::{Transaction, TransactionKind};
+use weevil::transfer::Transfer;
 
 const SERVER_ADDR: &str = "127.0.0.1:3333";
-const TEST_ACCOUNT: u64 = 99;
+const TEST_ACCOUNT1: u64 = 99;
+const TEST_ACCOUNT2: u64 = 42;
 
 fn clean_data_files() {
     let _ = fs::remove_file("./data_files/wal.log");
@@ -53,37 +54,27 @@ fn test_balance_survives_restart() {
     let mut conn = TcpStream::connect(SERVER_ADDR).unwrap();
     conn.set_nodelay(true).unwrap();
 
-    // register account
-    round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT)));
+    // register accounts
+    round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT1)));
+    round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT2)));
 
-    // send known transactions
+    // send known transfers
     round_trip(
         &mut conn,
-        bytemuck::bytes_of(&Transaction::new(
-            10_000,
-            TEST_ACCOUNT,
-            TransactionKind::Debit,
-        )),
+        bytemuck::bytes_of(&Transfer::new(10_000, TEST_ACCOUNT1, TEST_ACCOUNT2)),
     );
     round_trip(
         &mut conn,
-        bytemuck::bytes_of(&Transaction::new(
-            3_000,
-            TEST_ACCOUNT,
-            TransactionKind::Credit,
-        )),
+        bytemuck::bytes_of(&Transfer::new(3_000, TEST_ACCOUNT2, TEST_ACCOUNT1)),
     );
     round_trip(
         &mut conn,
-        bytemuck::bytes_of(&Transaction::new(
-            5_000,
-            TEST_ACCOUNT,
-            TransactionKind::Debit,
-        )),
+        bytemuck::bytes_of(&Transfer::new(5_000, TEST_ACCOUNT1, TEST_ACCOUNT2)),
     );
 
     // query to get committed final balance
-    let before = round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT)));
+    let before1 = round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT1)));
+    let before2 = round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT2)));
 
     drop(conn);
     server.kill().unwrap();
@@ -96,13 +87,15 @@ fn test_balance_survives_restart() {
     let mut conn = TcpStream::connect(SERVER_ADDR).unwrap();
     conn.set_nodelay(true).unwrap();
 
-    let after = round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT)));
+    let after1 = round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT1)));
+    let after2 = round_trip(&mut conn, bytemuck::bytes_of(&Account::new(TEST_ACCOUNT2)));
 
     drop(conn);
     server.kill().unwrap();
     server.wait().unwrap();
 
-    assert_eq!(before, after);
+    assert_eq!(before1, after1);
+    assert_eq!(before2, after2);
 
     clean_data_files();
 }

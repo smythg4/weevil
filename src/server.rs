@@ -5,14 +5,14 @@ use std::io::{Read, Write};
 
 use weevil::account::{Account, AccountEntry, AccountResponse, CACHE_FULL, NOT_FOUND};
 use weevil::account_cache::AccountEntryCache;
-use weevil::transaction::Transaction;
+use weevil::transfer::Transfer;
 use weevil::{MAX_CONNECTIONS, WeevilError};
 
 const SERVER: Token = Token(0);
 
 enum ParsedMessage {
     Account(Account),
-    Transaction(Transaction),
+    Transfer(Transfer),
     Incomplete,
     Closing,
 }
@@ -74,9 +74,9 @@ impl Session {
                                 ParsedMessage::Account(*acct)
                             }
                             1 => {
-                                let tx: &Transaction = bytemuck::from_bytes(&self.read_buf.0);
+                                let tx: &Transfer = bytemuck::from_bytes(&self.read_buf.0);
                                 tx.verify()?;
-                                ParsedMessage::Transaction(*tx)
+                                ParsedMessage::Transfer(*tx)
                             }
                             _ => return Err(WeevilError::InvalidMessageKind(self.read_buf.0[63])),
                         };
@@ -138,7 +138,7 @@ fn main() -> Result<(), WeevilError> {
     println!("Waiting to receive Weevil messages on {addr}...");
 
     loop {
-        if let Err(err) = poll.poll(&mut events, Some(std::time::Duration::from_micros(500))) {
+        if let Err(err) = poll.poll(&mut events, None) {
             if interrupted(&err) {
                 continue;
             }
@@ -164,8 +164,8 @@ fn main() -> Result<(), WeevilError> {
                             Ok(ParsedMessage::Account(acct)) => {
                                 process_account(acct, session, &mut account_entries)?
                             }
-                            Ok(ParsedMessage::Transaction(tx)) => {
-                                process_transaction(tx, session, &mut account_entries)?
+                            Ok(ParsedMessage::Transfer(tx)) => {
+                                process_transfer(tx, session, &mut account_entries)?
                             }
                             Err(e) => {
                                 // log the error
@@ -257,20 +257,37 @@ fn process_account(
     Ok(())
 }
 
-fn process_transaction(
-    tx: Transaction,
+fn process_transfer(
+    tx: Transfer,
     session: &mut Session,
     account_entries: &mut AccountEntryCache,
 ) -> Result<(), WeevilError> {
-    if let Some(a) = account_entries.get_mut(tx.account_id) {
-        println!("Pushing transaction to {a}...");
-        a.add_transaction(tx)?;
+    let mut debit_exists = false;
+    let mut credit_exists = false;
+    // handle debits
+    if let Some(a) = account_entries.get(tx.debit_account_id) {
+        println!("Debiting [{}] ${:.2}...", a, tx.amount as f64 / 1000.0);
+        debit_exists = true;
         // our write_buf is staged, now we wait until fsync is complete before sending
         session.stage_response(cast_response(a.response()));
     } else {
-        eprintln!("Account [{}] not found...", tx.account_id);
+        eprintln!("Account to debit [{}] not found...", tx.debit_account_id);
         session.stage_response(cast_response(NOT_FOUND));
     }
+    // handle credits
+    if let Some(a) = account_entries.get(tx.credit_account_id) {
+        println!("Crediting [{}] ${:.2}...", a, tx.amount as f64 / 1000.0);
+        credit_exists = true;
+        // our write_buf is staged, now we wait until fsync is complete before sending
+        session.stage_response(cast_response(a.response()));
+    } else {
+        eprintln!("Account to credit [{}] not found...", tx.credit_account_id);
+        session.stage_response(cast_response(NOT_FOUND));
+    }
+    if debit_exists && credit_exists {
+        account_entries.add_transaction(tx)?;
+    }
+    // TODO: Add error case for account not found
     Ok(())
 }
 

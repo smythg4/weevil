@@ -1,14 +1,17 @@
 use crate::MAX_ACCOUNTS;
 use crate::WeevilError;
 use crate::account::{AccountEntry, CheckpointRecord};
-use crate::transaction::{Transaction, TransactionKind};
+use crate::transfer::Transfer;
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
 
 const MAX_WAL_SIZE: u64 = 1_000_000;
+const MAX_BATCH: usize = 1000;
 
 pub struct AccountEntryCache {
     entries: [Option<AccountEntry>; MAX_ACCOUNTS],
+    pending_transactions: [Transfer; MAX_BATCH],
+    pt_len: usize,
     file_backing: File,
 }
 
@@ -29,6 +32,8 @@ impl AccountEntryCache {
         const EMPTY_ACCOUNT_ENTRY: Option<AccountEntry> = None;
         let mut cache = AccountEntryCache {
             entries: [EMPTY_ACCOUNT_ENTRY; MAX_ACCOUNTS],
+            pending_transactions: [Transfer::default(); MAX_BATCH],
+            pt_len: 0,
             file_backing: f,
         };
         cache.replay().expect("transaction replay failed");
@@ -75,12 +80,31 @@ impl AccountEntryCache {
         self.find_free_slot(acct_id).is_some()
     }
 
+    pub fn add_transaction(&mut self, tx: Transfer) -> Result<(), WeevilError> {
+        if self.pt_len >= MAX_BATCH {
+            return Err(WeevilError::PendingTransactionsFull);
+        }
+        self.pending_transactions[self.pt_len] = tx;
+        self.pt_len += 1;
+        Ok(())
+    }
+
     pub fn checkpoint(&mut self) -> Result<(), WeevilError> {
         let mut temp_file = OpenOptions::new()
             .create(true)
             .write(true)
             .truncate(true)
             .open("./data_files/checkpoint.tmp")?;
+        let (debit_sum, credit_sum) = self
+            .entries
+            .iter()
+            .flatten()
+            .fold((0u128, 0u128), |(d, c), ae| {
+                (d + ae.debit_balance, c + ae.credit_balance)
+            });
+        // TODO: This assert will be helpful once I switch from `Transaction` to `Transfer`
+        //assert_eq!(credit_sum, debit_sum);
+        println!("Total Debit: {}, Total Credit: {}", debit_sum, credit_sum);
         let crs = self.entries.iter().flatten().map(CheckpointRecord::from);
         for cr in crs {
             temp_file.write_all(bytemuck::bytes_of(&cr))?;
@@ -119,33 +143,50 @@ impl AccountEntryCache {
 
         // TODO: I'm probably swallowing errors silently
         while self.file_backing.read_exact(&mut buf).is_ok() {
-            let tx: Transaction = bytemuck::pod_read_unaligned(&buf);
+            let tx: Transfer = bytemuck::pod_read_unaligned(&buf);
             tx.verify()?;
-            if let Some(entry) = self.get_mut(tx.account_id) {
-                entry.apply_transaction(tx)?;
+            // update debit balances
+            if let Some(entry) = self.get_mut(tx.debit_account_id) {
+                entry.apply_transaction(&tx)?;
             } else {
-                let (db, cb) = match tx.kind()? {
-                    TransactionKind::Debit => (tx.amount, 0),
-                    TransactionKind::Credit => (0, tx.amount),
-                };
-                let acct_entry = AccountEntry::new(tx.account_id, db, cb)?;
+                let acct_entry = AccountEntry::new(tx.debit_account_id, tx.amount, 0)?;
+                self.insert(acct_entry).expect("ran out of space");
+            }
+            // update credit balances
+            if let Some(entry) = self.get_mut(tx.credit_account_id) {
+                entry.apply_transaction(&tx)?;
+            } else {
+                let acct_entry = AccountEntry::new(tx.credit_account_id, 0, tx.amount)?;
                 self.insert(acct_entry).expect("ran out of space");
             }
         }
+        let (debit_sum, credit_sum) = self
+            .entries
+            .iter()
+            .flatten()
+            .fold((0u128, 0u128), |(d, c), ae| {
+                (d + ae.debit_balance, c + ae.credit_balance)
+            });
+        assert_eq!(credit_sum, debit_sum);
         Ok(())
     }
 
     pub fn flush(&mut self) -> Result<(), WeevilError> {
-        let mut needs_sync = false;
-        self.entries.iter_mut().flatten().try_for_each(|ae| {
-            if ae.is_dirty() {
-                needs_sync = true;
-            }
-            ae.write(&mut self.file_backing)
-        })?;
-        if needs_sync {
-            self.file_backing.sync_data()?;
+        if self.pt_len == 0 {
+            return Ok(());
         }
+        println!("Flushing {} transfers...", self.pt_len);
+        self.file_backing.write_all(bytemuck::cast_slice(
+            &self.pending_transactions[0..self.pt_len],
+        ))?;
+        self.file_backing.sync_data()?;
+        for tx in &self.pending_transactions[0..self.pt_len] {
+            self.entries
+                .iter_mut()
+                .flatten()
+                .try_for_each(|ae| ae.apply_transaction(tx))?
+        }
+        self.pt_len = 0;
         if self.file_backing.metadata()?.len() > MAX_WAL_SIZE {
             self.checkpoint()?;
         }

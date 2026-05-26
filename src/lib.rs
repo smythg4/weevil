@@ -1,12 +1,12 @@
 pub mod account;
 pub mod account_cache;
 pub mod error;
-pub mod transaction;
+pub mod transfer;
 
 pub use error::WeevilError;
 
-pub const MAX_CONNECTIONS: usize = 65;
-pub const MAX_ACCOUNTS: usize = 257;
+pub const MAX_CONNECTIONS: usize = 256;
+pub const MAX_ACCOUNTS: usize = 256;
 
 #[repr(u8)]
 pub enum MessageKind {
