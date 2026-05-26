@@ -2,9 +2,10 @@ use bytemuck::{Pod, Zeroable};
 
 use crate::WeevilError;
 use crate::transfer::Transfer;
-use crate::{MessageKind, crc32};
+use crate::{MessageKind, crc32, crc32_chained};
 
 const _: () = assert!(std::mem::size_of::<Account>() == 64);
+const _: () = assert!(std::mem::offset_of!(Account, checksum) == 8);
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct Account {
@@ -30,12 +31,9 @@ impl Account {
     }
 
     pub fn verify(&self) -> Result<(), WeevilError> {
-        // TODO: Find a way to avoid this copy
-        let mut copy = *self;
-        let old_checksum = copy.checksum;
-        copy.checksum = 0;
-        let checksum = crc32(bytemuck::bytes_of(&copy));
-        if checksum == old_checksum {
+        let bytes = bytemuck::bytes_of(self);
+        let checksum = crc32_chained(&[&bytes[..8], &[0u8; 4], &bytes[12..]]);
+        if checksum == self.checksum {
             return Ok(());
         }
         Err(WeevilError::ChecksumFailed)
@@ -75,16 +73,12 @@ impl std::fmt::Display for AccountEntry {
 }
 
 impl AccountEntry {
-    pub fn new(
-        account_id: u64,
-        debit_balance: u128,
-        credit_balance: u128,
-    ) -> Result<Self, WeevilError> {
-        Ok(AccountEntry {
+    pub fn new(account_id: u64, debit_balance: u128, credit_balance: u128) -> Self {
+        AccountEntry {
             account_id,
             debit_balance,
             credit_balance,
-        })
+        }
     }
 
     pub fn apply_transaction(&mut self, tx: &Transfer) -> Result<(), WeevilError> {
@@ -92,6 +86,11 @@ impl AccountEntry {
             self.debit_balance += tx.amount;
         } else if self.account_id == tx.credit_account_id {
             self.credit_balance += tx.amount;
+        } else {
+            return Err(WeevilError::InvalidAccountId(
+                tx.debit_account_id,
+                tx.credit_account_id,
+            ));
         }
         // TODO: add an error case if neither tx account id applies to this account
         Ok(())
@@ -113,7 +112,7 @@ impl AccountEntry {
 }
 
 const _: () = assert!(std::mem::size_of::<AccountResponse>() == 64);
-
+const _: () = assert!(std::mem::offset_of!(AccountResponse, checksum) == 40);
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
 pub struct AccountResponse {
@@ -127,12 +126,9 @@ pub struct AccountResponse {
 
 impl AccountResponse {
     pub fn verify(&self) -> Result<(), WeevilError> {
-        // TODO: Find a way to avoid this copy
-        let mut copy = *self;
-        let old_checksum = copy.checksum;
-        copy.checksum = 0;
-        let checksum = crc32(bytemuck::bytes_of(&copy));
-        if checksum == old_checksum {
+        let bytes = bytemuck::bytes_of(self);
+        let checksum = crc32_chained(&[&bytes[..40], &[0u8; 4], &bytes[44..]]);
+        if checksum == self.checksum {
             return Ok(());
         }
         Err(WeevilError::ChecksumFailed)
@@ -187,6 +183,7 @@ impl std::fmt::Display for AccountResponse {
 }
 
 const _: () = assert!(std::mem::size_of::<CheckpointRecord>() == 64);
+const _: () = assert!(std::mem::offset_of!(CheckpointRecord, checksum) == 40);
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable)]
 pub struct CheckpointRecord {
@@ -199,12 +196,9 @@ pub struct CheckpointRecord {
 
 impl CheckpointRecord {
     pub fn verify(&self) -> Result<(), WeevilError> {
-        // TODO: Find a way to avoid this copy
-        let mut copy = *self;
-        let old_checksum = copy.checksum;
-        copy.checksum = 0;
-        let checksum = crc32(bytemuck::bytes_of(&copy));
-        if checksum == old_checksum {
+        let bytes = bytemuck::bytes_of(self);
+        let checksum = crc32_chained(&[&bytes[..40], &[0u8; 4], &bytes[44..]]);
+        if checksum == self.checksum {
             return Ok(());
         }
         Err(WeevilError::ChecksumFailed)

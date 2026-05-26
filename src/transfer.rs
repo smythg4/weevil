@@ -1,27 +1,9 @@
 use bytemuck::{Pod, Zeroable};
 
-use crate::{MessageKind, WeevilError, crc32};
-
-// DEAD CODE
-#[derive(Debug, Copy, Clone)]
-#[repr(u8)]
-pub enum TransactionKind {
-    Debit,
-    Credit,
-}
-
-// DEAD CODE
-impl std::fmt::Display for TransactionKind {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            TransactionKind::Debit => write!(f, "DEBIT"),
-            TransactionKind::Credit => write!(f, "CREDIT"),
-        }
-    }
-}
+use crate::{MessageKind, WeevilError, crc32, crc32_chained};
 
 const _: () = assert!(std::mem::size_of::<Transfer>() == 64);
-
+const _: () = assert!(std::mem::offset_of!(Transfer, checksum) == 32);
 // TODO: Add a txid field for idempotency purposes
 // Ex: Client sents tx with id, responses are acknowldged
 // with the same id
@@ -44,7 +26,7 @@ impl Transfer {
             credit_account_id,
             checksum: 0,
             _pad: [0u8; 27],
-            message_kind: MessageKind::Transaction as u8,
+            message_kind: MessageKind::Transfer as u8,
         };
         let checksum = crc32(bytemuck::bytes_of(&tx));
         tx.checksum = checksum;
@@ -52,12 +34,9 @@ impl Transfer {
     }
 
     pub fn verify(&self) -> Result<(), WeevilError> {
-        // TODO: Find a way to avoid this copy
-        let mut copy = *self;
-        let old_checksum = copy.checksum;
-        copy.checksum = 0;
-        let checksum = crc32(bytemuck::bytes_of(&copy));
-        if checksum == old_checksum {
+        let bytes = bytemuck::bytes_of(self);
+        let checksum = crc32_chained(&[&bytes[..32], &[0u8; 4], &bytes[36..]]);
+        if checksum == self.checksum {
             return Ok(());
         }
         Err(WeevilError::ChecksumFailed)
@@ -95,6 +74,6 @@ mod tests {
         assert_eq!(tx.amount, 1000);
         assert_eq!(tx.debit_account_id, 42);
         assert_eq!(tx.credit_account_id, 9);
-        assert_eq!(tx.message_kind, MessageKind::Transaction as u8);
+        assert_eq!(tx.message_kind, MessageKind::Transfer as u8);
     }
 }

@@ -245,7 +245,7 @@ fn process_account(
         println!("account cache full");
         session.stage_response(cast_response(CACHE_FULL));
     } else {
-        let entry = AccountEntry::new(acct.account_id, 0, 0)?;
+        let entry = AccountEntry::new(acct.account_id, 0, 0);
         println!("Registering account: {entry}...");
         // guaranteed to succeed — slot was confirmed above
         let entry = account_entries

@@ -1,6 +1,6 @@
-use crate::WeevilError;
 use crate::account::{AccountEntry, CheckpointRecord};
 use crate::transfer::Transfer;
+use crate::{CHECKPOINT_PATH, TEMP_CHECKPOINT_PATH, WAL_PATH, WeevilError};
 use crate::{MAX_ACCOUNTS, MAX_BATCH, MAX_WAL_SIZE};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
@@ -24,7 +24,7 @@ impl AccountEntryCache {
             .append(true)
             .create(true)
             .read(true)
-            .open("./data_files/wal.log")
+            .open(WAL_PATH)
             .expect("error loading wal file");
         const EMPTY_ACCOUNT_ENTRY: Option<AccountEntry> = None;
         let mut cache = AccountEntryCache {
@@ -91,7 +91,7 @@ impl AccountEntryCache {
             .create(true)
             .write(true)
             .truncate(true)
-            .open("./data_files/checkpoint.tmp")?;
+            .open(TEMP_CHECKPOINT_PATH)?;
         let (debit_sum, credit_sum) = self
             .entries
             .iter()
@@ -99,15 +99,13 @@ impl AccountEntryCache {
             .fold((0u128, 0u128), |(d, c), ae| {
                 (d + ae.debit_balance, c + ae.credit_balance)
             });
-        // TODO: This assert will be helpful once I switch from `Transaction` to `Transfer`
-        //assert_eq!(credit_sum, debit_sum);
-        println!("Total Debit: {}, Total Credit: {}", debit_sum, credit_sum);
+        assert_eq!(credit_sum, debit_sum);
         let crs = self.entries.iter().flatten().map(CheckpointRecord::from);
         for cr in crs {
             temp_file.write_all(bytemuck::bytes_of(&cr))?;
         }
         temp_file.sync_data()?;
-        std::fs::rename("./data_files/checkpoint.tmp", "./data_files/checkpoint")?;
+        std::fs::rename(TEMP_CHECKPOINT_PATH, CHECKPOINT_PATH)?;
         self.file_backing.set_len(0)?;
         self.file_backing.seek(SeekFrom::Start(0))?;
         Ok(())
@@ -117,17 +115,14 @@ impl AccountEntryCache {
         let mut buf = [0u8; 64];
 
         // check the checkpoint file if it exists
-        match OpenOptions::new()
-            .read(true)
-            .open("./data_files/checkpoint")
-        {
+        match OpenOptions::new().read(true).open(CHECKPOINT_PATH) {
             Ok(mut checkpoint_file) => {
                 // TODO: I'm probably swallowing errors silently
                 while checkpoint_file.read_exact(&mut buf).is_ok() {
                     let cr: CheckpointRecord = bytemuck::pod_read_unaligned(&buf);
                     cr.verify()?;
                     let acct_entry =
-                        AccountEntry::new(cr.account_id, cr.debit_balance, cr.credit_balance)?;
+                        AccountEntry::new(cr.account_id, cr.debit_balance, cr.credit_balance);
                     self.insert(acct_entry).expect("ran out of space");
                 }
             }
@@ -146,14 +141,14 @@ impl AccountEntryCache {
             if let Some(entry) = self.get_mut(tx.debit_account_id) {
                 entry.apply_transaction(&tx)?;
             } else {
-                let acct_entry = AccountEntry::new(tx.debit_account_id, tx.amount, 0)?;
+                let acct_entry = AccountEntry::new(tx.debit_account_id, tx.amount, 0);
                 self.insert(acct_entry).expect("ran out of space");
             }
             // update credit balances
             if let Some(entry) = self.get_mut(tx.credit_account_id) {
                 entry.apply_transaction(&tx)?;
             } else {
-                let acct_entry = AccountEntry::new(tx.credit_account_id, 0, tx.amount)?;
+                let acct_entry = AccountEntry::new(tx.credit_account_id, 0, tx.amount);
                 self.insert(acct_entry).expect("ran out of space");
             }
         }

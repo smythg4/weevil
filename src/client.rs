@@ -8,9 +8,8 @@ use weevil::WeevilError;
 use weevil::account::{Account, AccountResponse};
 use weevil::transfer::Transfer;
 
-// const NUM_THREADS: usize = 250;
-// const NUM_TRANSACTIONS: usize = 2000;
 static TX_COUNT: AtomicUsize = AtomicUsize::new(0);
+const HOT_ACCT: u64 = 99999;
 
 fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), WeevilError> {
     conn.write_all(outbound)?;
@@ -22,34 +21,37 @@ fn handle_round_trip(conn: &mut TcpStream, outbound: &[u8]) -> Result<(), Weevil
     Ok(())
 }
 
-fn client_connection(account_id: u64, num_transactions: usize) -> Result<(), WeevilError> {
+fn client_connection(
+    account_id: u64,
+    num_transactions: usize,
+    hot: bool,
+) -> Result<(), WeevilError> {
     let mut conn = TcpStream::connect("127.0.0.1:3333")?;
     conn.set_nodelay(true)?;
 
     let acct = Account::new(account_id);
     //println!("[CLIENT] {acct}");
     handle_round_trip(&mut conn, bytemuck::bytes_of(&acct))?;
-    let acct = Account::new((account_id + 1) % (num_transactions as u64));
-    //println!("[CLIENT] {acct}");
-    handle_round_trip(&mut conn, bytemuck::bytes_of(&acct))?;
+    let other_acct = if hot {
+        Account::new(HOT_ACCT)
+    } else {
+        Account::new((account_id + 1) % (num_transactions as u64))
+    };
+    //println!("[CLIENT] {other_acct}");
+    handle_round_trip(&mut conn, bytemuck::bytes_of(&other_acct))?;
 
     let mut rng = rand::rng();
 
     for _ in 0..num_transactions {
         let amt = rng.random_range(1000u128..=1_000_000);
-        let tx = Transfer::new(
-            amt,
-            account_id,
-            (account_id + 1) % (num_transactions as u64),
-        );
+        let tx = Transfer::new(amt, account_id, other_acct.account_id);
         //println!("[CLIENT] {tx}");
         handle_round_trip(&mut conn, bytemuck::bytes_of(&tx))?;
         TX_COUNT.fetch_add(1, Relaxed);
     }
 
-    let acct = Account::new(account_id);
-    //println!("[CLIENT] {acct}");
     handle_round_trip(&mut conn, bytemuck::bytes_of(&acct))?;
+    handle_round_trip(&mut conn, bytemuck::bytes_of(&other_acct))?;
 
     Ok(())
 }
@@ -64,7 +66,7 @@ fn main() {
 
     for i in 0..num_threads {
         let handle = thread::spawn(move || {
-            if let Err(e) = client_connection(i as u64, num_transactions) {
+            if let Err(e) = client_connection(i as u64, num_transactions, false) {
                 eprintln!("Thread {i} error: {e}");
             }
         });
