@@ -178,10 +178,18 @@ impl AccountEntryCache {
         ))?;
         self.file_backing.sync_data()?;
         for tx in &self.pending_transactions[0..self.pt_len] {
-            self.entries
-                .iter_mut()
-                .flatten()
-                .try_for_each(|ae| ae.apply_transaction(tx))?
+            let debit_idx = self.get_account_idx(tx.debit_account_id);
+            let credit_idx = self.get_account_idx(tx.credit_account_id);
+            if let Some(idx) = debit_idx
+                && let Some(ae) = self.entries[idx].as_mut()
+            {
+                ae.apply_transaction(tx)?;
+            }
+            if let Some(idx) = credit_idx
+                && let Some(ae) = self.entries[idx].as_mut()
+            {
+                ae.apply_transaction(tx)?;
+            }
         }
         self.pt_len = 0;
         if self.file_backing.metadata()?.len() > MAX_WAL_SIZE {

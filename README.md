@@ -88,7 +88,22 @@ Measured on a MacBook Pro (Apple Silicon) with `NUM_THREADS` varied and total tr
 | 250 | 40 | 10,000 | ~12,227 |
 | 251 | 1000 | 251,000 | ~13,058 |
 
-TPS scales with concurrency because `fdatasync` cost is amortized across all transfers that arrive during a single event loop iteration. At low concurrency (10 threads), batches jump between 1 and 9 transfers per sync. At ~200 threads batches grow to about 56-72 transfers.
+TPS scales with concurrency because `fdatasync` cost is amortized across all transfers that arrive during a single event loop iteration. At low concurrency (10 threads), transfer batches range between 1 and 9 transfers per sync. At ~200 threads transfer batches grow to about 56-72.
+
+Assuming the following configuration (I landed on these arbitrarily), the peak memory footprint is 1.2MB regardless of the throughput.
+```
+// Maximum number of connections the server will accept
+pub const MAX_CONNECTIONS: usize = 256;
+
+// Maximum number of accounts to handle
+pub const MAX_ACCOUNTS: usize = 257; // prime number to reduce probe clustering
+
+// Maximum size of the WAL file before a snapshot
+pub const MAX_WAL_SIZE: u64 = 1024 * 1024; // 1MB max
+
+// Maximum number of transfers to store in memory before flushing to disk
+pub const MAX_BATCH: usize = 1000;
+```
 
 ## What it is not
 

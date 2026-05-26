@@ -12,10 +12,10 @@ pub const MAX_CONNECTIONS: usize = 256;
 pub const MAX_ACCOUNTS: usize = 257; // prime number to reduce probe clustering
 
 // Maximum size of the WAL file before a snapshot
-const MAX_WAL_SIZE: u64 = 1024 * 1024; // 1MB max
+pub const MAX_WAL_SIZE: u64 = 1024 * 1024; // 1MB max
 
 // Maximum number of transfers to store in memory before flushing to disk
-const MAX_BATCH: usize = 1000;
+pub const MAX_BATCH: usize = 1000;
 
 #[repr(u8)]
 pub enum MessageKind {
