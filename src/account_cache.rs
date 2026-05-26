@@ -1,12 +1,9 @@
-use crate::MAX_ACCOUNTS;
 use crate::WeevilError;
 use crate::account::{AccountEntry, CheckpointRecord};
 use crate::transfer::Transfer;
+use crate::{MAX_ACCOUNTS, MAX_BATCH, MAX_WAL_SIZE};
 use std::fs::{File, OpenOptions};
 use std::io::{Read, Seek, SeekFrom, Write};
-
-const MAX_WAL_SIZE: u64 = 1_000_000;
-const MAX_BATCH: usize = 1000;
 
 pub struct AccountEntryCache {
     entries: [Option<AccountEntry>; MAX_ACCOUNTS],

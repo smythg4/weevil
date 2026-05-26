@@ -69,7 +69,7 @@ The response reflects the committed balances at the previous flush boundary — 
 cargo run --bin server
 
 # run the test client (NUM_THREADS concurrent connections, NUM_TRANSACTIONS each)
-cargo run --bin client
+cargo run --bin client <NUM_THREADS> <NUM_TRANSACTIONS>
 ```
 
 The client registers each account, sends a series of random transfers, then queries the final balance. `./data_files/wal.log` and `./data_files/checkpoint` persist across restarts.
@@ -86,8 +86,9 @@ Measured on a MacBook Pro (Apple Silicon) with `NUM_THREADS` varied and total tr
 | 100 | 100 | 10,000 | ~10,787 |
 | 200 | 50 | 10,000 | ~11,793 |
 | 250 | 40 | 10,000 | ~12,227 |
+| 251 | 1000 | 251,000 | ~13,058 |
 
-TPS scales with concurrency because `fdatasync` cost is amortized across all transfers that arrive during a single event loop iteration. At low concurrency (10 threads), batches average 2–8 transfers per sync. Throughput plateaus around 12,000 TPS at ~200 threads — beyond that, batches are saturated and adding more concurrent clients yields diminishing returns. All numbers represent 100% successful durable commits with response verification.
+TPS scales with concurrency because `fdatasync` cost is amortized across all transfers that arrive during a single event loop iteration. At low concurrency (10 threads), batches jump between 1 and 9 transfers per sync. At ~200 threads batches grow to about 56-72 transfers.
 
 ## What it is not
 
