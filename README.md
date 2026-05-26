@@ -98,7 +98,9 @@ Transaction history is not preserved — the WAL is truncated after each checkpo
 
 ## Next Steps
 
-- **Transaction IDs for idempotency** — add a `txid: u64` field to `Transaction`, repurposed from padding. Clients assign an ID to each transaction; the server echoes it back in `AccountResponse`. Duplicate submissions with the same ID can be detected and rejected, making retries safe.
+- **Transfer TimeStamps** — add a `timestamp: u64` field to `Transfer`, repurposed from padding. Allows temporal reconstruction of account balance change history. This won't matter much with current checkpointing behavior, but once a storage engine is in place it will be useful.
+
+- **Transfer IDs for idempotency** — add a `txid: u64` field to `Transfer`, repurposed from padding. Clients assign an ID to each transfer; the server echoes it back in `AccountResponse`. Duplicate submissions with the same ID can be detected and rejected, making retries safe.
 
 - **Testing** — coverage is thin. Missing: checksum rejection on corrupt data; WAL-only replay (no checkpoint); checkpoint + WAL tail replay; partial `checkpoint.tmp` doesn't corrupt state on restart; `MAX_BATCH` boundary (100th transaction succeeds, 101st returns `PendingTransactionsFull`); account cache full response; duplicate account registration returns existing balance; `NOT_FOUND` on unregistered account; open-addressing correctness under hash collisions.
 

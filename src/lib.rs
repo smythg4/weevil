@@ -9,7 +9,7 @@ pub use error::WeevilError;
 pub const MAX_CONNECTIONS: usize = 256;
 
 // Maximum number of accounts to handle
-pub const MAX_ACCOUNTS: usize = 256;
+pub const MAX_ACCOUNTS: usize = 257; // prime number to reduce probe clustering
 
 // Maximum size of the WAL file before a snapshot
 const MAX_WAL_SIZE: u64 = 1024 * 1024; // 1MB max
