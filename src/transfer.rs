@@ -20,6 +20,7 @@ pub struct Transfer {
 
 impl Transfer {
     pub fn new(amount: u128, debit_account_id: u64, credit_account_id: u64) -> Self {
+        assert!(debit_account_id != credit_account_id, "Cannot debit and credit the same account");
         let mut tx = Transfer {
             amount,
             debit_account_id,
@@ -65,9 +66,9 @@ mod tests {
         bytes[0..16].copy_from_slice(&1000u128.to_le_bytes());
         // debit_account_id: 42 as u64, little-endian at offset 16
         bytes[16..24].copy_from_slice(&42u64.to_le_bytes());
-        // credit_account_id: 9 as u64, little-endian at offset 16
+        // credit_account_id: 9 as u64, little-endian at offset 24
         bytes[24..32].copy_from_slice(&9u64.to_le_bytes());
-        // message_kind = 1 (Transaction)
+        // message_kind = 1 (Transfer)
         bytes[63] = 1;
 
         let tx: Transfer = bytemuck::pod_read_unaligned(&bytes);

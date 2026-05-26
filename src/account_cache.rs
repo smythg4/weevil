@@ -68,6 +68,7 @@ impl AccountEntryCache {
     pub fn insert(&mut self, acct_entry: AccountEntry) -> Option<&AccountEntry> {
         let id = acct_entry.account_id;
         if let Some(idx) = self.find_free_slot(id) {
+            assert!(self.entries[idx].is_none());
             self.entries[idx] = Some(acct_entry)
         }
         self.get(id)
@@ -108,6 +109,7 @@ impl AccountEntryCache {
         std::fs::rename(TEMP_CHECKPOINT_PATH, CHECKPOINT_PATH)?;
         self.file_backing.set_len(0)?;
         self.file_backing.seek(SeekFrom::Start(0))?;
+        assert_eq!(self.file_backing.metadata()?.len(), 0);
         Ok(())
     }
 

@@ -92,7 +92,6 @@ impl AccountEntry {
                 tx.credit_account_id,
             ));
         }
-        // TODO: add an error case if neither tx account id applies to this account
         Ok(())
     }
 
