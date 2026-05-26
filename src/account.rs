@@ -81,18 +81,17 @@ impl AccountEntry {
         }
     }
 
-    pub fn apply_transaction(&mut self, tx: &Transfer) -> Result<(), WeevilError> {
+    pub fn apply_transaction(&mut self, tx: &Transfer) {
         if self.account_id == tx.debit_account_id {
             self.debit_balance += tx.amount;
         } else if self.account_id == tx.credit_account_id {
             self.credit_balance += tx.amount;
         } else {
-            return Err(WeevilError::InvalidAccountId(
-                tx.debit_account_id,
-                tx.credit_account_id,
-            ));
+            unreachable!(
+                "apply_transaction called on non-participant account {}",
+                self.account_id
+            );
         }
-        Ok(())
     }
 
     pub fn response(&self) -> AccountResponse {
@@ -115,12 +114,12 @@ const _: () = assert!(std::mem::offset_of!(AccountResponse, checksum) == 40);
 #[repr(C)]
 #[derive(Debug, Copy, Clone, Pod, Zeroable, PartialEq, Eq)]
 pub struct AccountResponse {
-    debit_balance: u128,
-    credit_balance: u128,
-    account_id: u64,
+    pub debit_balance: u128,
+    pub credit_balance: u128,
+    pub account_id: u64,
     pub checksum: u32,
     _pad: [u8; 19],
-    status: u8,
+    pub status: u8,
 }
 
 impl AccountResponse {
@@ -246,5 +245,13 @@ mod tests {
     fn test_cache_full_checksum() {
         let response: &AccountResponse = bytemuck::from_bytes(bytemuck::bytes_of(&CACHE_FULL));
         assert!(response.verify().is_ok());
+    }
+
+    #[test]
+    #[should_panic(expected = "apply_transaction called on non-participant account 42")]
+    fn test_apply_transaction_invalid_account() {
+        let mut account_entry = AccountEntry::new(42, 0, 0);
+        let tx = Transfer::new(1000, 1, 2).unwrap();
+        let _ = account_entry.apply_transaction(&tx);
     }
 }

@@ -141,14 +141,14 @@ impl AccountEntryCache {
             tx.verify()?;
             // update debit balances
             if let Some(entry) = self.get_mut(tx.debit_account_id) {
-                entry.apply_transaction(&tx)?;
+                entry.apply_transaction(&tx);
             } else {
                 let acct_entry = AccountEntry::new(tx.debit_account_id, tx.amount, 0);
                 self.insert(acct_entry).expect("ran out of space");
             }
             // update credit balances
             if let Some(entry) = self.get_mut(tx.credit_account_id) {
-                entry.apply_transaction(&tx)?;
+                entry.apply_transaction(&tx);
             } else {
                 let acct_entry = AccountEntry::new(tx.credit_account_id, 0, tx.amount);
                 self.insert(acct_entry).expect("ran out of space");
@@ -180,12 +180,12 @@ impl AccountEntryCache {
             if let Some(idx) = debit_idx
                 && let Some(ae) = self.entries[idx].as_mut()
             {
-                ae.apply_transaction(tx)?;
+                ae.apply_transaction(tx);
             }
             if let Some(idx) = credit_idx
                 && let Some(ae) = self.entries[idx].as_mut()
             {
-                ae.apply_transaction(tx)?;
+                ae.apply_transaction(tx);
             }
         }
         self.pt_len = 0;

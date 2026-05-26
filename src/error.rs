@@ -14,6 +14,6 @@ pub enum WeevilError {
     #[error("checksum failed")]
     ChecksumFailed,
 
-    #[error("invalid account_id debit: {0} or credit: {1}")]
-    InvalidAccountId(u64, u64), // (debit id, credit id)
+    #[error("self transfer: {0}")]
+    SelfTransfer(u64), // account_id
 }

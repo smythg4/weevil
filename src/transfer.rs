@@ -19,8 +19,14 @@ pub struct Transfer {
 }
 
 impl Transfer {
-    pub fn new(amount: u128, debit_account_id: u64, credit_account_id: u64) -> Self {
-        assert!(debit_account_id != credit_account_id, "Cannot debit and credit the same account");
+    pub fn new(
+        amount: u128,
+        debit_account_id: u64,
+        credit_account_id: u64,
+    ) -> Result<Self, WeevilError> {
+        if debit_account_id == credit_account_id {
+            return Err(WeevilError::SelfTransfer(debit_account_id));
+        }
         let mut tx = Transfer {
             amount,
             debit_account_id,
@@ -31,7 +37,7 @@ impl Transfer {
         };
         let checksum = crc32(bytemuck::bytes_of(&tx));
         tx.checksum = checksum;
-        tx
+        Ok(tx)
     }
 
     pub fn verify(&self) -> Result<(), WeevilError> {
@@ -76,5 +82,11 @@ mod tests {
         assert_eq!(tx.debit_account_id, 42);
         assert_eq!(tx.credit_account_id, 9);
         assert_eq!(tx.message_kind, MessageKind::Transfer as u8);
+    }
+
+    #[test]
+    fn test_self_transfer_rejected() {
+        let result = Transfer::new(1000, 42, 42);
+        assert!(matches!(result, Err(WeevilError::SelfTransfer(42))));
     }
 }

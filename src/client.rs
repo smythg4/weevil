@@ -44,7 +44,7 @@ fn client_connection(
 
     for _ in 0..num_transactions {
         let amt = rng.random_range(1000u128..=1_000_000);
-        let tx = Transfer::new(amt, account_id, other_acct.account_id);
+        let tx = Transfer::new(amt, account_id, other_acct.account_id)?;
         //println!("[CLIENT] {tx}");
         handle_round_trip(&mut conn, bytemuck::bytes_of(&tx))?;
         TX_COUNT.fetch_add(1, Relaxed);
