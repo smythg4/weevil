@@ -279,10 +279,10 @@ fn process_transfer(
     // credit account information back to client
     let debit_response = account_entries
         .get(tx.debit_account_id)
-        .map(|a| a.response());
+        .map(|debit_account| debit_account.response());
     let credit_response = account_entries
         .get(tx.credit_account_id)
-        .map(|a| a.response());
+        .map(|credit_account| credit_account.response());
 
     match (debit_response, credit_response) {
         (Some(_), Some(cr)) => {
